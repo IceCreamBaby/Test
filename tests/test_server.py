@@ -20,8 +20,8 @@ def test_full_flow(monkeypatch, speech_wav):
     monkeypatch.setattr(transcribe, "transcribe", lambda audio, *a, **k: {"language": "de", "words": [dict(w) for w in words]})
     segs = [{"s": 0.5, "e": 4.1, "spk": 0}, {"s": 4.2, "e": 7.1, "spk": 1}, {"s": 7.2, "e": 11.1, "spk": 0},
             {"s": 11.2, "e": 13.6, "spk": 1}]
-    monkeypatch.setattr(diarize, "diarize", lambda audio, n, progress=None: segs)
-    monkeypatch.setattr(diarize, "speaker_embeddings", lambda audio, s: {0: [1.0, 0.0], 1: [0.0, 1.0]})
+    monkeypatch.setattr(diarize, "diarize_isolated",
+                        lambda wav, n, progress=None, cancel=None: (segs, {0: [1.0, 0.0], 1: [0.0, 1.0]}))
 
     from podcast_animator.server import create_app
 

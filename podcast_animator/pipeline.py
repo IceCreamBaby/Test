@@ -158,19 +158,14 @@ class Pipeline:
         prog = self._progress(pid, "Sprecher", 0.65, 0.2)
         num = int(s.get("num_speakers") or 0)
         if num == 1:
-            segs = [{"s": 0.0, "e": duration, "spk": 0}]
+            segs, embs = [{"s": 0.0, "e": duration, "spk": 0}], {}
         else:
-            segs = diarize.diarize(audio, num, progress=prog)  # (lässt sich intern nicht unterbrechen)
+            segs, embs = diarize.diarize_isolated(wav, num, progress=prog, cancel=cancel)
         assign_speakers(tr["words"], segs)
         store.save_transcript(pid, {"language": tr["language"], "words": tr["words"], "diarization": segs})
         partial_file.unlink(missing_ok=True)
         prog(0.9, "Ordne Stimmen den Figuren zu …")
         speakers = self._speaker_table(audio, segs, tr["words"])
-        try:
-            embs = diarize.speaker_embeddings(audio, segs) if num != 1 else {}
-        except Exception as exc:
-            log.warning("Stimmprofile nicht berechnet: %s", exc)
-            embs = {}
         self._auto_map(speakers, embs)
         (d / "speaker_embeddings.json").write_text(json.dumps({str(k): v for k, v in embs.items()}), encoding="utf-8")
         store.update(pid, lambda q: q.update(speakers=speakers))

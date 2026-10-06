@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing as mp
 import os
+import queue
+import threading
 from typing import Callable
 
 import numpy as np
@@ -67,6 +70,61 @@ def diarize(audio: np.ndarray, num_speakers: int = 2, progress: ProgressFn | Non
     result = sd.process(np.ascontiguousarray(audio, dtype=np.float32), callback=cb).sort_by_start_time()
     segs = [{"s": round(float(r.start), 3), "e": round(float(r.end), 3), "spk": int(r.speaker)} for r in result]
     return _renumber_by_talk_time(segs)
+
+
+def diarize_isolated(wav_path, num_speakers: int = 2, progress: ProgressFn | None = None,
+                     cancel: threading.Event | None = None) -> tuple[list[dict], dict[int, list[float]]]:
+    """Sprechererkennung + Stimmprofile in einem eigenen Prozess.
+
+    sherpa-onnx gibt den Python-GIL während der Berechnung nicht frei – im Hauptprozess würde die
+    Oberfläche sonst minutenlang hängen. Außerdem lässt sich ein eigener Prozess sauber abbrechen.
+    """
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    proc = ctx.Process(target=_isolated_worker, args=(str(wav_path), num_speakers, q), daemon=True)
+    proc.start()
+    try:
+        while True:
+            try:
+                msg = q.get(timeout=0.5)
+            except queue.Empty:
+                if cancel is not None and cancel.is_set():
+                    raise RuntimeError("Abgebrochen")
+                if not proc.is_alive():
+                    try:
+                        msg = q.get(timeout=2)
+                    except queue.Empty:
+                        raise RuntimeError(f"Sprechererkennung unerwartet beendet (Code {proc.exitcode}).") from None
+                else:
+                    continue
+            if msg[0] == "progress":
+                if progress:
+                    progress(msg[1], msg[2])
+            elif msg[0] == "result":
+                return msg[1], {int(k): v for k, v in msg[2].items()}
+            else:
+                raise RuntimeError(f"Sprechererkennung fehlgeschlagen: {msg[1]}")
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+        proc.join(timeout=10)
+
+
+def _isolated_worker(wav_path: str, num_speakers: int, q) -> None:
+    try:
+        from .media import read_wav
+
+        audio, _ = read_wav(wav_path)
+        segs = diarize(audio, num_speakers, progress=lambda f, m: q.put(("progress", f, m)))
+        q.put(("progress", 1.0, "Berechne Stimmprofile …"))
+        try:
+            embs = speaker_embeddings(audio, segs)
+        except Exception as exc:  # Stimmprofile sind optional
+            log.warning("Stimmprofile nicht berechnet: %s", exc)
+            embs = {}
+        q.put(("result", segs, embs))
+    except Exception as exc:
+        q.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def _renumber_by_talk_time(segs: list[dict]) -> list[dict]:
