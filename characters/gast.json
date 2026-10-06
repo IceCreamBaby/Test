@@ -1,0 +1,19 @@
+{
+  "id": "gast",
+  "name": "Gast",
+  "type": "vector",
+  "color": "#ff5fa2",
+  "skin": "#d9a27c",
+  "hair": "#5a3a22",
+  "hair_style": "messy",
+  "eye_color": "#3b2618",
+  "outfit": "tshirt",
+  "outfit_color": "#c2385b",
+  "outfit_accent": "#ffffff",
+  "headphones": true,
+  "headphones_color": "#26262b",
+  "glasses": true,
+  "beard": "none",
+  "face_width": 1.02,
+  "scale": 1.0
+}

@@ -1,0 +1,25 @@
+{
+  "id": "julien",
+  "name": "Julien",
+  "type": "vector",
+  "color": "#ffb020",
+  "skin": "#f0c8a2",
+  "hair": "#1d1a1c",
+  "hair_style": "quiff",
+  "eye_color": "#3b2618",
+  "outfit": "jacket",
+  "outfit_color": "#4f5d3a",
+  "outfit_accent": "#f2efe6",
+  "headphones": true,
+  "headphones_color": "#e9e6e1",
+  "glasses": false,
+  "beard": "stubble",
+  "face_width": 1.0,
+  "scale": 1.0,
+  "aliases": [
+    "Julien",
+    "Ju",
+    "Jule",
+    "Juli"
+  ]
+}

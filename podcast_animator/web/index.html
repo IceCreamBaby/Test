@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Podcast Animator</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/"><span class="logo">🎙️</span> Podcast Animator</a>
+    <nav>
+      <a href="#/" data-nav="home">Projekte</a>
+      <a href="#/figuren" data-nav="figuren">Figuren</a>
+      <a href="#/einstellungen" data-nav="einstellungen">Einstellungen</a>
+    </nav>
+    <div id="worker-badge" class="worker-badge idle">Bereit</div>
+  </header>
+  <main id="app"><div class="loading">Lade …</div></main>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
