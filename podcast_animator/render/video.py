@@ -227,8 +227,23 @@ def prepare(audio_wav: str | Path, words: list[dict], start: float, end: float, 
     return ClipRenderer(local, env, end - start, seats, opts)
 
 
+FRAME_PIX_FMT = "rgba"
+
+
+def frame_surface(buf: np.ndarray) -> skia.Surface:
+    """Zeichenfläche direkt auf einem numpy-Puffer – immer im Format RGBA.
+
+    Wichtig: skias Standardformat ("N32") ist plattformabhängig – unter Linux RGBA, unter Windows BGRA.
+    Ohne festes Format wären unter Windows Rot und Blau vertauscht (blaue Gesichter im Video).
+    """
+    surf = skia.Surface(buf, colorType=skia.kRGBA_8888_ColorType, alphaType=skia.kPremul_AlphaType)
+    if surf.imageInfo().colorType() != skia.kRGBA_8888_ColorType:  # pragma: no cover - Schutz
+        raise RuntimeError("Zeichenfläche hat nicht das erwartete RGBA-Format.")
+    return surf
+
+
 def _video_args(fps: int, opts: RenderOptions) -> list[str]:
-    return ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{H}", "-r", str(fps), "-i", "-"]
+    return ["-f", "rawvideo", "-pix_fmt", FRAME_PIX_FMT, "-s", f"{W}x{H}", "-r", str(fps), "-i", "-"]
 
 
 def _x264_args(fps: int, opts: RenderOptions) -> list[str]:
@@ -244,7 +259,7 @@ def _encode_frames(r: ClipRenderer, frames: range, ffmpeg_args: list[str], tick:
     err_thread = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
     err_thread.start()
     buffers = [np.empty((H, W, 4), dtype=np.uint8) for _ in range(3)]
-    surfaces = [skia.Surface(b) for b in buffers]
+    surfaces = [frame_surface(b) for b in buffers]
     q: queue.Queue = queue.Queue(maxsize=1)
     write_error: list[Exception] = []
 
