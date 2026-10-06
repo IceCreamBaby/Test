@@ -1,0 +1,20 @@
+{
+  "id": "rezo",
+  "name": "Rezo",
+  "type": "vector",
+  "color": "#38a3ff",
+  "skin": "#f4cdb0",
+  "hair": "#2f86ff",
+  "hair_style": "swoop",
+  "eye_color": "#4a6b8a",
+  "brows": "#1f5fc4",
+  "outfit": "hoodie",
+  "outfit_color": "#1f2029",
+  "outfit_accent": "#38a3ff",
+  "headphones": true,
+  "headphones_color": "#2b2b31",
+  "glasses": false,
+  "beard": "none",
+  "face_width": 0.96,
+  "scale": 1.0
+}
