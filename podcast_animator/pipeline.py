@@ -296,7 +296,8 @@ class Pipeline:
         if words and not matched:
             # ohne gespeicherte Stimmen: wer wen beim Namen nennt, verrät die Zuordnung
             main = [sp["spk"] for sp in speakers if not sp.get("other")]
-            by_name = name_mentions(words, main, [c for c in defaults if c in available])
+            cast = [c for c in defaults if c in available][:len(main)]  # z.B. Rezo + Julien
+            by_name = name_mentions(words, main, cast)
             for k, c in by_name.items():
                 matched[k] = c
                 for sp in speakers:

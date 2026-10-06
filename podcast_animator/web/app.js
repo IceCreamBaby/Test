@@ -392,6 +392,7 @@ function renderSpeakers() {
           <button class="ghost" data-play="${sp.spk}" title="Hörprobe">▶</button></div>
         <div><b>${sp.other ? "Sonstige Stimmen" : `Sprecher ${sp.spk + 1}`}</b> <span class="muted">· ${dur(sp.talk_time)}${sp.other ? " (z.B. Werbung, Einspieler)" : " Redezeit"}</span>
           ${sp.matched ? '<span class="badge ok">Stimme wiedererkannt</span>' : ""}
+          ${sp.by_name ? '<span class="badge info" title="Erkannt daran, wer wen beim Namen nennt – bitte kurz prüfen">am Namen erkannt</span>' : ""}
           <div class="sample">„${esc(sp.sample_text)}“</div></div>
         <select data-char>${opt("none", "– keine Figur –", sp.char)}${chars.map((c) => opt(c.id, c.name, sp.char)).join("")}</select>
         <div class="row" style="gap:4px"><button class="ghost" data-up>↑</button><button class="ghost" data-down>↓</button></div>
