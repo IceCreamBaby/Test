@@ -49,3 +49,29 @@ def test_cli_defaults_to_serve(monkeypatch):
     assert seen == {"port": 7861, "nb": True}
     cli.main([])
     assert seen["port"] == 7860
+
+
+def test_transcribe_resume_offsets(monkeypatch):
+    """Fortsetzen: bereits fertige Wörter bleiben, neue Wörter werden um den Startpunkt verschoben."""
+    import types
+
+    import numpy as np
+
+    from podcast_animator import transcribe as tr
+
+    seen = {}
+
+    class FakeModel:
+        def transcribe(self, audio, **kw):
+            seen["len"] = len(audio)
+            w = types.SimpleNamespace(word=" neu", start=1.0, end=1.5, probability=0.9)
+            seg = types.SimpleNamespace(words=[w], end=2.0)
+            return iter([seg]), types.SimpleNamespace(language="de")
+
+    monkeypatch.setattr(tr, "_load_model", lambda *a: FakeModel())
+    audio = np.zeros(16000 * 10, dtype=np.float32)
+    old = [{"w": "alt", "s": 0.5, "e": 1.0, "p": 1.0}, {"w": "weg", "s": 4.2, "e": 4.8, "p": 1.0}]
+    res = tr.transcribe(audio, "small", "de", device="cpu", resume={"words": old, "done_until": 4.0})
+    assert seen["len"] == 16000 * 6
+    assert [w["w"] for w in res["words"]] == ["alt", "neu"]
+    assert res["words"][1]["s"] == 5.0

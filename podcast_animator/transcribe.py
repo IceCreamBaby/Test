@@ -45,15 +45,23 @@ def _load_model(model_size: str, device: str):
                         download_root=str(MODELS_DIR / "whisper"))
 
 
+CheckpointFn = Callable[[list, float], None]
+
+
 def transcribe(audio: np.ndarray, model_size: str = "small", language: str | None = "de",
                device: str = "auto", hotwords: str | None = None,
-               progress: ProgressFn | None = None) -> dict:
-    """Gibt {'language', 'words': [{w, s, e, p}]} zurück. Zeiten in Sekunden relativ zu `audio`."""
+               progress: ProgressFn | None = None, resume: dict | None = None,
+               checkpoint: CheckpointFn | None = None) -> dict:
+    """Gibt {'language', 'words': [{w, s, e, p}]} zurück. Zeiten in Sekunden relativ zu `audio`.
+
+    resume: {'words': [...], 'done_until': Sekunden} – setzt eine abgebrochene Transkription fort.
+    checkpoint(words, done_until) wird regelmäßig mit dem Zwischenstand aufgerufen.
+    """
     devices = ["cuda", "cpu"] if device == "auto" and cuda_available() else [device if device != "auto" else "cpu"]
     last_error: Exception | None = None
     for dev in devices:
         try:
-            return _transcribe_on(audio, model_size, language, dev, hotwords, progress)
+            return _transcribe_on(audio, model_size, language, dev, hotwords, progress, resume, checkpoint)
         except Exception as exc:  # z.B. fehlende CUDA-Bibliotheken -> CPU versuchen
             last_error = exc
             if dev == "cuda":
@@ -65,13 +73,20 @@ def transcribe(audio: np.ndarray, model_size: str = "small", language: str | Non
     raise RuntimeError(f"Transkription fehlgeschlagen: {last_error}")
 
 
-def _transcribe_on(audio, model_size, language, device, hotwords, progress) -> dict:
+def _transcribe_on(audio, model_size, language, device, hotwords, progress, resume, checkpoint) -> dict:
     if progress:
         progress(0.0, f"Lade Spracherkennungsmodell '{model_size}' ({device.upper()}) – beim ersten Mal wird es heruntergeladen …")
     model = _load_model(model_size, device)
     duration = len(audio) / SAMPLE_RATE
+    words: list[dict] = []
+    offset = 0.0
+    if resume and resume.get("words") is not None:
+        offset = max(0.0, min(float(resume.get("done_until", 0.0)), duration))
+        words = [dict(w) for w in resume["words"] if w["e"] <= offset + 0.01]
+        if progress:
+            progress(offset / duration, f"Setze Transkription bei {_fmt(offset)} fort …")
     segments, info = model.transcribe(
-        audio,
+        audio[int(offset * SAMPLE_RATE):],
         language=language or None,
         word_timestamps=True,
         vad_filter=True,
@@ -80,16 +95,21 @@ def _transcribe_on(audio, model_size, language, device, hotwords, progress) -> d
         condition_on_previous_text=False,
         hotwords=hotwords or None,
     )
-    words: list[dict] = []
+    last_checkpoint = offset
     for seg in segments:
         for w in seg.words or []:
             text = w.word.strip()
             if not text:
                 continue
-            words.append({"w": text, "s": round(float(w.start), 3), "e": round(float(w.end), 3),
+            words.append({"w": text, "s": round(float(w.start) + offset, 3), "e": round(float(w.end) + offset, 3),
                           "p": round(float(w.probability), 3)})
+        done = seg.end + offset
         if progress and duration > 0:
-            progress(min(1.0, seg.end / duration), f"Transkribiere … {_fmt(seg.end)} / {_fmt(duration)}")
+            progress(min(1.0, done / duration), f"Transkribiere … {_fmt(done)} / {_fmt(duration)}")
+        # Zwischenstand sichern (Segmentende = sinnvoller Wiedereinstiegspunkt)
+        if checkpoint and done - last_checkpoint >= 90:
+            checkpoint(words, done)
+            last_checkpoint = done
     _fix_word_times(words)
     return {"language": info.language, "words": words}
 

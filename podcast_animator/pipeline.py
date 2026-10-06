@@ -130,9 +130,28 @@ class Pipeline:
 
         # 2) Spracherkennung
         prog = self._progress(pid, "Transkription", 0.05, 0.6)
+        # Zwischenstände erlauben das Fortsetzen nach einem Abbruch (gleiches Modell, gleicher Bereich)
+        partial_file = d / "transcript.partial.json"
+        key = {"model": s.get("model", "small"), "range": s.get("range"), "language": s.get("language"),
+               "duration": round(duration, 2)}
+        resume = None
+        if partial_file.exists():
+            try:
+                part = json.loads(partial_file.read_text(encoding="utf-8"))
+                if part.get("key") == key:
+                    resume = part
+            except Exception:
+                resume = None
+
+        def save_partial(words: list, done_until: float) -> None:
+            tmp = partial_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"key": key, "done_until": done_until, "words": words}), encoding="utf-8")
+            tmp.replace(partial_file)
+
         tr = transcribe.transcribe(audio, s.get("model", "small"), s.get("language") or None,
                                    hotwords=load_settings().get("hotwords") or None,
-                                   progress=lambda f, m: (prog(f, m), check()))
+                                   progress=lambda f, m: (prog(f, m), check()),
+                                   resume=resume, checkpoint=save_partial)
         check()
 
         # 3) Sprecher erkennen
@@ -144,6 +163,7 @@ class Pipeline:
             segs = diarize.diarize(audio, num, progress=prog)  # (lässt sich intern nicht unterbrechen)
         assign_speakers(tr["words"], segs)
         store.save_transcript(pid, {"language": tr["language"], "words": tr["words"], "diarization": segs})
+        partial_file.unlink(missing_ok=True)
         prog(0.9, "Ordne Stimmen den Figuren zu …")
         speakers = self._speaker_table(audio, segs, tr["words"])
         try:
