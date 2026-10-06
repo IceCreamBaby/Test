@@ -261,11 +261,17 @@ class Pipeline:
         clips = [new_clip(x.start, x.end, x.title, x.reason, x.score, x.source) for x in sugg]
         clips.sort(key=lambda c: c["start"])
 
+        removed = [] if append else list(store.get(pid)["clips"])
+
         def fn(q):
             q["clips"] = (q["clips"] if append else []) + clips
             if note:
                 q["notes"].append(note)
         store.update(pid, fn)
+        for c in removed:  # Dateien ersetzter Clips aufräumen
+            for key in ("video", "srt", "thumb"):
+                if c.get(key):
+                    (store.dir(pid) / c[key]).unlink(missing_ok=True)
 
     def _speaker_table(self, audio: np.ndarray, segs: list[dict], words: list[dict]) -> list[dict]:
         talk: dict[int, float] = {}

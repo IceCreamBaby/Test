@@ -19,7 +19,9 @@ Claude (KI) die besten Stellen auswählen und Titel schreiben.
    Optional nur einen Zeitbereich verarbeiten (z.B. `1:02:30` bis `1:04:00`).
 2. **Spracherkennung** (Whisper, lokal) – jedes Wort mit genauem Zeitstempel.
 3. **Sprechererkennung** – erkennt, wer wann spricht, und ordnet die Stimmen den Figuren zu.
-   Beim ersten Mal kurz prüfen; danach **merkt sich das Programm die Stimmen** und ordnet bei neuen Folgen automatisch zu.
+   Beim ersten Mal hilft ein Trick: Wer „Julien“ sagt, ist vermutlich Rezo (und umgekehrt) – trotzdem kurz prüfen.
+   Danach **merkt sich das Programm die Stimmen** und ordnet bei neuen Folgen automatisch zu.
+   Eingefügte Werbung oder Einspieler werden als „Sonstige“ erkannt und bekommen keine Figur.
 4. **Clip-Suche** – findet die besten Stellen (schnelles Hin und Her, Lacher, Ausrufe, Energie …).
    Mit Claude-API-Key versteht die KI auch den Inhalt und schreibt packende Titel.
 5. **Animation** – die Figuren sitzen am Studio-Tisch, bewegen die Lippen passend zu den Silben, blinzeln, nicken,
@@ -35,7 +37,7 @@ Claude (KI) die besten Stellen auswählen und Titel schreiben.
 3. Der Browser öffnet sich mit `http://127.0.0.1:7860`. Fertig!
 
 Beim ersten Verarbeiten lädt das Programm einmalig die KI-Modelle herunter (Spracherkennung „small“ ≈ 0,5 GB,
-„large-v3-turbo“ ≈ 1,6 GB, Sprechererkennung ≈ 30 MB).
+„large-v3-turbo“ ≈ 1,6 GB, Sprechererkennung ≈ 40 MB).
 
 **macOS / Linux:** `./start.sh` ausführen (unter Linux zusätzlich `libegl1` und `libgl1` installieren:
 `sudo apt install libegl1 libgl1`).
@@ -51,6 +53,8 @@ Beim ersten Verarbeiten lädt das Programm einmalig die KI-Modelle herunter (Spr
 3. **Los geht's** – der Fortschritt wird live angezeigt. Clips werden automatisch gerendert.
 4. **Sprecher & Figuren prüfen:** Mit ▶ in die Stimme reinhören und ggf. die Figur ändern, mit ↑↓ die Sitzordnung.
    „Zuordnung speichern“ → danach „Alle rendern“. Die Stimmen werden gemerkt, beim nächsten Podcast passt es automatisch.
+   Stimmt die Aufteilung gar nicht (z.B. Gast dabei), klappe „Sprecher neu erkennen“ auf – das dauert nur ein paar
+   Minuten, die Transkription bleibt erhalten.
 5. **Clip bearbeiten (✏️):** Start/Ende verschieben, Titel ändern, Untertitel korrigieren, einzelne Zeilen einem anderen
    Sprecher zuordnen, Layout pro Clip wählen, Vorschau-Bild an beliebiger Stelle ansehen.
 6. **⬇ MP4** herunterladen oder **📁 Ordner öffnen** – und hochladen. Die **SRT**-Datei kannst du bei YouTube als
@@ -107,8 +111,12 @@ Fallback). Kosten: grob wenige Cent pro Folge. Ohne Key funktioniert alles lokal
 
 - **NVIDIA-Grafikkarte:** wird automatisch für die Spracherkennung genutzt (dann lohnt sich „large-v3-turbo“ für beste Qualität).
   Falls dabei Fehler wegen fehlender CUDA-Bibliotheken auftreten, rechnet das Programm automatisch mit der CPU weiter.
-- **Ohne Grafikkarte:** Modell „small“ (Standard) ist ein guter Kompromiss. Für eine 2-Stunden-Folge rechne grob mit
-  15–30 Minuten Transkription. Tipp: Nur den interessanten Zeitbereich verarbeiten.
+- **Ohne Grafikkarte:** Modell „small“ (Standard) ist ein guter Kompromiss. Praxistest mit einer 79-minütigen
+  Hobbylos-Folge auf einem schwachen 4-Kern-Rechner: ca. 35 Minuten Transkription, 2 Minuten Sprechererkennung,
+  ca. 30 Sekunden pro gerendertem Short. Ein aktueller Gaming-PC ist deutlich schneller.
+  Tipp: Nur den interessanten Zeitbereich verarbeiten.
+- Wird das Programm während der Transkription geschlossen, macht es beim nächsten „Erneut verarbeiten“ an der
+  Stelle weiter, an der es aufgehört hat.
 - Das Rendern nutzt automatisch alle CPU-Kerne (ein 45-Sekunden-Short braucht auf einem aktuellen PC meist unter einer Minute).
 
 ### Ohne Oberfläche (Kommandozeile / Automatisierung)
@@ -134,6 +142,7 @@ uv run python -m podcast_animator process folge.mp4 --claude --chars rezo,julien
 | „uv“ wird nicht gefunden | Fenster schließen und `start.bat` erneut starten (der PATH wird erst danach aktualisiert). |
 | Fehler mit `onnxruntime`/DLL unter Windows | „Microsoft Visual C++ Redistributable“ (x64) von Microsoft installieren. |
 | Sprecher vertauscht | Unter „Sprecher & Figuren“ die Figuren tauschen, speichern, „Alle rendern“. |
+| Sprecher falsch aufgeteilt | „Sprecher & Figuren“ → „Sprecher neu erkennen“ (ggf. mit 3 Sprechern oder „automatisch“). |
 | Falsche Wörter in den Untertiteln | Clip bearbeiten → Text korrigieren, oder ein größeres Whisper-Modell wählen. |
 | Mehr als 2 Personen | Beim Erstellen unter „Erweitert“ die Sprecheranzahl auf 3 oder „automatisch“ stellen. |
 | Port 7860 belegt | `start.bat --port 7861` |
@@ -150,7 +159,7 @@ lege den echten Personen keine erfundenen Aussagen in den Mund – das Programm 
 | Baustein | Bibliothek |
 |---|---|
 | Spracherkennung | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (Whisper, lokal) |
-| Sprechererkennung | [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) mit pyannote-Segmentierung + WeSpeaker-Stimmprofilen |
+| Sprechererkennung | Stimm-Embeddings mit NeMo TitaNet über [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), eigene Gruppierung mit Werbungs-Erkennung und Viterbi-Glättung pro Wort |
 | Zeichnen/Animation | [skia-python](https://github.com/kyamagu/skia-python) (Vektorgrafik), eigener Animations-Code |
 | Video/Audio | ffmpeg (über `imageio-ffmpeg` mitgeliefert), x264, Lautheits-Normalisierung auf −14 LUFS |
 | Oberfläche | FastAPI + HTML/JS, läuft nur lokal auf `127.0.0.1` |

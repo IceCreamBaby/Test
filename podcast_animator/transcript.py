@@ -99,7 +99,7 @@ def sentences(words: list[dict], max_gap: float = 1.0) -> list[Group]:
 
 
 def subtitle_chunks(words: list[dict], max_words: int = 3, max_chars: int = 18,
-                    max_gap: float = 0.45) -> list[Group]:
+                    max_gap: float = 0.45, split_after: str = ".!?…,;:") -> list[Group]:
     """Kurze Untertitel-Häppchen im Shorts-Stil (wenige Wörter, Wechsel bei Sprecher/Pause/Satzende)."""
     chunks: list[Group] = []
     for w in words:
@@ -109,7 +109,7 @@ def subtitle_chunks(words: list[dict], max_words: int = 3, max_chars: int = 18,
             length = len(cur.text) + 1 + len(w["w"])
             split = (cur.spk != w.get("spk", 0) or w["s"] - last["e"] > max_gap
                      or len(cur.words) >= max_words or length > max_chars
-                     or re.search(r"[.!?…,;:]$", last["w"]) is not None)
+                     or (bool(split_after) and last["w"][-1:] in split_after))
             if not split:
                 cur.words.append(w)
                 continue
@@ -146,8 +146,12 @@ def to_srt(words: list[dict], speaker_names: dict[int, str] | None = None) -> st
         return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
 
     lines = []
-    for i, g in enumerate(subtitle_chunks(words, max_words=8, max_chars=42, max_gap=0.8), 1):
+    chunks = subtitle_chunks(words, max_words=10, max_chars=50, max_gap=0.8, split_after=".!?…")
+    for i, g in enumerate(chunks, 1):
         name = (speaker_names or {}).get(g.spk)
         text = f"{name}: {g.text}" if name else g.text
-        lines.append(f"{i}\n{ts(g.start)} --> {ts(g.end)}\n{text}\n")
+        # mindestens ~0,8 s sichtbar, aber nicht über den nächsten Eintrag hinaus
+        nxt = chunks[i].start if i < len(chunks) else g.end + 1.0
+        end = min(max(g.end, g.start + 0.8), nxt - 0.02) if nxt > g.end else g.end
+        lines.append(f"{i}\n{ts(g.start)} --> {ts(end)}\n{text}\n")
     return "\n".join(lines)
