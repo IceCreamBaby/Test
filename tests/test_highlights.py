@@ -48,3 +48,18 @@ def test_parse_and_format_ts():
     assert media.parse_ts("62:03") == 3723
     assert media.parse_ts("") is None
     assert media.format_ts(3723.5) == "1:02:03.5"
+
+
+def test_find_clips_avoids_foreign_voices():
+    words = _long_podcast()
+    # die lustige Stelle gehört hier einer fremden Stimme (z.B. Werbung) -> darf nicht gewählt werden
+    funny_start = next(w["s"] for w in words if w["w"] == "Alter")
+    for w in words:
+        if funny_start - 1 <= w["s"] <= funny_start + 30:
+            w["spk"] = 2
+    env = np.ones(int(words[-1]["e"] * 10) + 1, dtype=np.float32)
+    res, note = highlights.find_clips(words, env, {0: "A", 1: "B", 2: "Sonstige"}, count=2, min_len=15,
+                                      max_len=40, avoid_speakers={2})
+    assert res and note == ""
+    for c in res:
+        assert not (c.start <= funny_start + 5 and c.end >= funny_start + 5)

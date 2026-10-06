@@ -162,13 +162,13 @@ class Pipeline:
         if num == 1:
             segs, embs = [{"s": 0.0, "e": duration, "spk": 0}], {}
         else:
-            segs, embs = diarize.diarize_isolated(wav, num, progress=prog, cancel=cancel)
+            segs, embs = diarize.diarize_isolated(wav, num, words=tr["words"], progress=prog, cancel=cancel)
         assign_speakers(tr["words"], segs)
         store.save_transcript(pid, {"language": tr["language"], "words": tr["words"], "diarization": segs})
         partial_file.unlink(missing_ok=True)
         prog(0.9, "Ordne Stimmen den Figuren zu …")
         speakers = self._speaker_table(audio, segs, tr["words"])
-        self._auto_map(speakers, embs)
+        self._auto_map(speakers, embs, tr["words"])
         (d / "speaker_embeddings.json").write_text(json.dumps({str(k): v for k, v in embs.items()}), encoding="utf-8")
         store.update(pid, lambda q: q.update(speakers=speakers))
         check()
@@ -210,11 +210,12 @@ class Pipeline:
             dur = float(store.get(pid).get("duration") or (words[-1]["e"] if words else 0))
             segs, embs = [{"s": 0.0, "e": dur, "spk": 0}], {}
         else:
-            segs, embs = diarize.diarize_isolated(d / "audio16k.wav", num, progress=prog, cancel=cancel)
+            segs, embs = diarize.diarize_isolated(d / "audio16k.wav", num, words=words, progress=prog,
+                                                  cancel=cancel)
         assign_speakers(words, segs)
         store.save_transcript(pid, {**tr, "words": words, "diarization": segs})
         speakers = self._speaker_table(None, segs, words)
-        self._auto_map(speakers, embs)
+        self._auto_map(speakers, embs, words)
         (d / "speaker_embeddings.json").write_text(json.dumps({str(k): v for k, v in embs.items()}), encoding="utf-8")
 
         def fn(q):
@@ -286,12 +287,21 @@ class Pipeline:
                           "sample_text": text, "matched": False, "other": k in others})
         return table
 
-    def _auto_map(self, speakers: list[dict], embs: dict[int, list[float]]) -> None:
+    def _auto_map(self, speakers: list[dict], embs: dict[int, list[float]], words: list[dict] | None = None) -> None:
         defaults = [c for c in load_settings().get("default_chars", ["rezo", "julien", "gast"])]
         available = {c["id"] for c in list_characters()}
         candidates = [c for c in defaults if c in available] + sorted(available - set(defaults))
         others = {sp["spk"] for sp in speakers if sp.get("other")}
         matched = diarize.match_profiles({k: v for k, v in embs.items() if k not in others}, candidates)
+        if words and not matched:
+            # ohne gespeicherte Stimmen: wer wen beim Namen nennt, verrät die Zuordnung
+            main = [sp["spk"] for sp in speakers if not sp.get("other")]
+            by_name = name_mentions(words, main, [c for c in defaults if c in available])
+            for k, c in by_name.items():
+                matched[k] = c
+                for sp in speakers:
+                    if sp["spk"] == k:
+                        sp["by_name"] = True
         used = set(matched.values())
         free = [c for c in candidates if c not in used]
         for sp in speakers:
@@ -300,7 +310,7 @@ class Pipeline:
                 sp["char"] = "none"  # Werbung/Einspieler bekommen keine Figur
             elif k in matched:
                 sp["char"] = matched[k]
-                sp["matched"] = True
+                sp["matched"] = not sp.get("by_name")
             elif free:
                 sp["char"] = free.pop(0)
         # Sitzordnung: die Reihenfolge der Standardfiguren (z.B. Rezo links, Julien rechts)
@@ -357,6 +367,37 @@ class Pipeline:
         clip = next(c for c in p["clips"] if c["id"] == cid)
         return render_preview(self.store.dir(pid) / "audio16k.wav", clip_words(self.store, p, clip),
                               clip["start"], clip["end"], seats_for(p), render_options(p, clip), at)
+
+
+def name_mentions(words: list[dict], speakers: list[int], chars: list[str], margin: int = 3) -> dict[int, str]:
+    """Ordnet Sprecher anhand von Namensnennungen zu: Wer oft "Julien" sagt, ist vermutlich nicht Julien.
+
+    Gibt nur dann eine Zuordnung zurück, wenn die beste Variante deutlich besser ist als die zweitbeste.
+    """
+    import itertools
+    import re
+
+    aliases = {}
+    for cid in chars:
+        ch = get_character(cid)
+        names = ch.get("aliases") or [ch.get("name", cid)]
+        aliases[cid] = {re.sub(r"[^\wäöüß]", "", a.lower()) for a in names}
+    count = {(spk, cid): 0 for spk in speakers for cid in chars}
+    for w in words:
+        tok = re.sub(r"[^\wäöüß]", "", w["w"].lower())
+        for cid, names in aliases.items():
+            if tok in names and (w.get("spk"), cid) in count:
+                count[(w["spk"], cid)] += 1
+    if len(speakers) < 2 or len(chars) < len(speakers) or sum(count.values()) < margin:
+        return {}
+    options = []
+    for perm in itertools.permutations(chars, len(speakers)):
+        self_mentions = sum(count[(spk, cid)] for spk, cid in zip(speakers, perm))
+        options.append((self_mentions, perm))
+    options.sort()
+    if len(options) > 1 and options[1][0] - options[0][0] < margin:
+        return {}
+    return dict(zip(speakers, options[0][1]))
 
 
 def _safe(name: str) -> str:

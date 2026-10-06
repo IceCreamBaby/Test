@@ -1,46 +1,84 @@
 import numpy as np
 
-from podcast_animator.diarize import match_profiles, merge_clusters
+from podcast_animator import diarize as D
 
 
 def _unit(v):
-    v = np.asarray(v, dtype=np.float32)
-    return (v / np.linalg.norm(v)).tolist()
+    v = np.asarray(v, dtype=np.float64)
+    return v / np.linalg.norm(v)
 
 
-def test_ad_voice_does_not_steal_a_host_slot():
-    # Cluster 0/1 = Host A (zwei Teil-Cluster), 2 = Host B, 3 = Werbung (fremd, kurz)
-    segs = [{"s": 0, "e": 30, "spk": 3}]
-    t = 30.0
-    for i in range(60):
-        spk = [0, 2, 1, 2][i % 4]
-        segs.append({"s": t, "e": t + 8, "spk": spk})
-        t += 8.2
-    embs = {0: _unit([1, 0.1, 0]), 1: _unit([0.9, 0.25, 0.05]), 2: _unit([0.05, 1, 0.1]), 3: _unit([0, 0.1, 1])}
-    out = merge_clusters(segs, embs, 2)
-    labels = {s["spk"] for s in out}
-    assert labels == {0, 1, 2}  # zwei Hosts + "Sonstige"
-    ad = [s for s in out if s["s"] == 0][0]
-    assert ad["spk"] == 2 and ad.get("other")
-    talk = {k: sum(s["e"] - s["s"] for s in out if s["spk"] == k) for k in labels}
-    assert abs(talk[0] - talk[1]) < 0.2 * talk[0]  # Hosts etwa gleich viel
+def _synthetic(turns, rng):
+    """turns: [(speaker_vector, start, end)] -> Wörter, Fensterstarts, Fenster-Embeddings."""
+    words, voice_at = [], []
+    for vec, s, e in turns:
+        t = s
+        while t + 0.3 <= e:
+            words.append({"w": "wort", "s": round(t, 2), "e": round(t + 0.3, 2)})
+            t += 0.4
+        voice_at.append((s, e, vec))
+    dur = turns[-1][2] + 1
+    starts = D.speech_windows(words, dur)
+    E = []
+    for st in starts:
+        mid = st + D.WIN / 2
+        vec = next((v for s, e, v in voice_at if s <= mid < e), voice_at[-1][2])
+        E.append(_unit(vec + rng.normal(0, 0.25, len(vec))))
+    return words, starts, np.array(E)
 
 
-def test_auto_mode_finds_distinct_voices():
-    segs = [{"s": i * 10, "e": i * 10 + 9, "spk": i % 3} for i in range(30)]
-    embs = {0: _unit([1, 0, 0]), 1: _unit([0, 1, 0]), 2: _unit([0, 0, 1])}
-    out = merge_clusters(segs, embs, 0)
-    assert {s["spk"] for s in out} == {0, 1, 2}
-    assert not any(s.get("other") for s in out)
+def test_two_hosts_and_ad_are_separated():
+    rng = np.random.default_rng(1)
+    a, b, ad = _unit([1, 0.3, 0, 0]), _unit([0.2, 1, 0, 0]), _unit([0, 0, 0.3, 1])
+    turns = [(ad, 0, 20)]
+    t = 20.5
+    for i in range(30):
+        turns.append((a if i % 2 == 0 else b, t, t + 6))
+        t += 6.3
+    words, starts, E = _synthetic(turns, rng)
+    lab, C = D._kmeans(E, 2)
+    path = D.label_words(words, starts, E @ C.T)
+    ad_words = [p for w, p in zip(words, path) if w["e"] < 20]
+    assert np.mean(np.array(ad_words) == 2) > 0.9  # Werbung -> "Sonstige"
+    # Hosts: jede Redezeile überwiegend einem Sprecher, abwechselnd
+    per_turn = []
+    for _vec, s, e in turns[1:]:
+        labs = [p for w, p in zip(words, path) if s <= w["s"] < e]
+        per_turn.append(max(set(labs), key=labs.count))
+        assert labs.count(per_turn[-1]) / len(labs) > 0.85
+    assert all(x != y for x, y in zip(per_turn, per_turn[1:]))
 
 
-def test_match_profiles_greedy():
-    embs = {0: _unit([1, 0]), 1: _unit([0, 1])}
-    import podcast_animator.diarize as d
+def test_choose_k_auto():
+    rng = np.random.default_rng(2)
+    vecs = [_unit([1, 0, 0]), _unit([0, 1, 0]), _unit([0, 0, 1])]
+    E = np.array([_unit(vecs[i % 3] + rng.normal(0, 0.15, 3)) for i in range(300)])
+    assert D.choose_k(E) == 3
+    E1 = np.array([_unit(vecs[0] + rng.normal(0, 0.15, 3)) for _ in range(300)])
+    assert D.choose_k(E1) == 1
 
-    orig = d.load_profiles
-    d.load_profiles = lambda: {"rezo": {"embedding": _unit([0.1, 1])}, "julien": {"embedding": _unit([1, 0.2])}}
-    try:
-        assert match_profiles(embs, ["rezo", "julien"]) == {1: "rezo", 0: "julien"}
-    finally:
-        d.load_profiles = orig
+
+def test_speech_windows_only_where_words():
+    words = [{"w": "x", "s": 10.0, "e": 12.0}]
+    st = D.speech_windows(words, 30.0)
+    assert len(st) and st.min() >= 9.0 and st.max() <= 11.3
+
+
+def test_profiles_ignore_other_models(tmp_path, monkeypatch):
+    monkeypatch.setattr(D, "PROFILE_FILE", tmp_path / "p.json")
+    (tmp_path / "p.json").write_text('{"rezo": {"embedding": [1, 0], "count": 1, "model": "alt.onnx"}}')
+    assert D.load_profiles() == {}
+    D.save_profile("julien", [0.0, 1.0])
+    assert D.match_profiles({0: [1.0, 0.0], 1: [0.0, 1.0]}, ["julien", "rezo"]) == {1: "julien"}
+
+
+def test_name_mentions_mapping():
+    from podcast_animator.pipeline import name_mentions
+
+    def w(text, spk):
+        return {"w": text, "s": 0, "e": 0.1, "spk": spk}
+
+    words = [w("Julien,", 0), w("Julien", 0), w("Julien?", 0), w("Julien", 0), w("Rezo", 1), w("Rezo!", 1),
+             w("Rezo", 1), w("Julien", 1)]
+    assert name_mentions(words, [0, 1], ["rezo", "julien"]) == {0: "rezo", 1: "julien"}
+    assert name_mentions(words[:2], [0, 1], ["rezo", "julien"]) == {}  # zu wenig Hinweise

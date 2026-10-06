@@ -133,7 +133,7 @@ def find_local(words: list[dict], env10: np.ndarray | None, count: int = 5, min_
             score = (1.4 * f_turns + 1.2 * f_laugh + 0.8 * f_excl + 0.9 * f_kw + 0.5 * f_rate + 0.8 * f_bal
                      + 0.35 * max(-1.0, min(1.5, loud)) + 0.35 * min(1.5, dyn) + 0.4 * f_len + 0.3 * ends_clean
                      - (0.6 if first_word in WEAK_START else 0.0) - 1.2 * min(3.0, f_ad)
-                     - 6.0 * (foreign[b] - foreign[a]) / max(1, nwords))
+                     - ((3.0 + 10.0 * (foreign[b] - foreign[a]) / max(1, nwords)) if foreign[b] > foreign[a] else 0.0))
             reason = []
             if f_laugh > 0:
                 reason.append(f"{int(laugh[b] - laugh[a])}× Lachen")
@@ -274,7 +274,8 @@ def snap_to_words(words: list[dict], start: float, end: float) -> tuple[float, f
 
 def find_clips(words: list[dict], env10: np.ndarray | None, speaker_names: dict[int, str], count: int = 5,
                min_len: float = 20.0, max_len: float = 55.0, use_claude: bool = False, api_key: str | None = None,
-               context: str = "", progress=None) -> tuple[list[Suggestion], str]:
+               context: str = "", progress=None,
+               avoid_speakers: set[int] | None = None) -> tuple[list[Suggestion], str]:
     """Gibt (Vorschläge, Hinweistext) zurück. Fällt bei Problemen mit Claude auf die lokale Suche zurück."""
     note = ""
     if use_claude:
