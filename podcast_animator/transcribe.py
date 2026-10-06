@@ -110,8 +110,23 @@ def _transcribe_on(audio, model_size, language, device, hotwords, progress, resu
         if checkpoint and done - last_checkpoint >= 90:
             checkpoint(words, done)
             last_checkpoint = done
+    words = _merge_fragments(words)
     _fix_word_times(words)
     return {"language": info.language, "words": words}
+
+
+def _merge_fragments(words: list[dict]) -> list[dict]:
+    """Fügt abgetrennte Wortteile wieder an („Nano“ + „-Bots“ → „Nano-Bots“)."""
+    out: list[dict] = []
+    for w in words:
+        if out and len(w["w"]) > 1 and w["w"][0] in "-'’" and w["s"] - out[-1]["e"] < 0.35:
+            prev = out[-1]
+            prev["w"] = prev["w"] + w["w"]
+            prev["e"] = w["e"]
+            prev["p"] = min(prev.get("p", 1.0), w.get("p", 1.0))
+        else:
+            out.append(w)
+    return out
 
 
 def _fix_word_times(words: list[dict]) -> None:

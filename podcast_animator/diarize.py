@@ -40,8 +40,20 @@ def ensure_models(progress: ProgressFn | None = None) -> tuple[str, str]:
     return seg, emb
 
 
+FINE_THRESHOLD = 0.5     # sherpa: feine Vor-Aufteilung in (eher zu viele) Stimmgruppen
+SEED_MIN_SHARE = 0.03    # Hauptsprecher brauchen mind. 3 % der Redezeit
+SEED_MAX_SIM = 0.55      # Hauptsprecher müssen klar verschiedene Stimmen haben
+ASSIGN_MIN_SIM = 0.35    # darunter: fremde Stimme (Werbung, Einspieler) -> "Sonstige"
+
+
 def diarize(audio: np.ndarray, num_speakers: int = 2, progress: ProgressFn | None = None) -> list[dict]:
-    """Gibt eine nach Startzeit sortierte Liste [{s, e, spk}] zurück."""
+    """Gibt eine nach Startzeit sortierte Liste [{s, e, spk}] zurück.
+
+    Ablauf: sherpa-onnx teilt die Aufnahme fein in Stimmgruppen auf; danach werden die größten, klar
+    unterscheidbaren Gruppen als Hauptsprecher gewählt und alle übrigen Gruppen per Stimmähnlichkeit
+    zugeordnet. Fremde Stimmen (z.B. eingefügte Werbung) landen als eigener Sprecher am Ende der
+    Liste, statt einen Hauptsprecher-Platz zu belegen.
+    """
     import sherpa_onnx
 
     seg_model, emb_model = ensure_models(progress)
@@ -51,8 +63,7 @@ def diarize(audio: np.ndarray, num_speakers: int = 2, progress: ProgressFn | Non
             num_threads=_threads(),
         ),
         embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=emb_model, num_threads=_threads()),
-        clustering=sherpa_onnx.FastClusteringConfig(
-            num_clusters=num_speakers if num_speakers and num_speakers > 0 else -1, threshold=0.5),
+        clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=FINE_THRESHOLD),
         min_duration_on=0.3,
         min_duration_off=0.5,
     )
@@ -62,14 +73,82 @@ def diarize(audio: np.ndarray, num_speakers: int = 2, progress: ProgressFn | Non
 
     def cb(done: int, total: int) -> int:
         if progress and total:
-            progress(done / total, f"Erkenne Sprecher … {int(100 * done / total)} %")
+            progress(0.9 * done / total, f"Erkenne Sprecher … {int(100 * done / total)} %")
         return 0
 
     if progress:
         progress(0.0, "Erkenne Sprecher …")
     result = sd.process(np.ascontiguousarray(audio, dtype=np.float32), callback=cb).sort_by_start_time()
     segs = [{"s": round(float(r.start), 3), "e": round(float(r.end), 3), "spk": int(r.speaker)} for r in result]
-    return _renumber_by_talk_time(segs)
+    if progress:
+        progress(0.92, "Fasse Stimmgruppen zusammen …")
+    embs = speaker_embeddings(audio, segs, max_seconds=30)
+    return merge_clusters(segs, embs, num_speakers)
+
+
+def merge_clusters(segs: list[dict], embs: dict[int, list[float]], num_speakers: int | None) -> list[dict]:
+    """Fasst feine Stimmgruppen zu Hauptsprechern zusammen (num_speakers <= 0: automatisch).
+
+    Ergebnis: Sprecher 0..k-1 = Hauptsprecher (nach Redezeit sortiert), Sprecher k = Sonstige (falls nötig).
+    """
+    if not segs:
+        return segs
+    talk: dict[int, float] = {}
+    for sg in segs:
+        talk[sg["spk"]] = talk.get(sg["spk"], 0.0) + sg["e"] - sg["s"]
+    total = sum(talk.values()) or 1.0
+    vec = {k: np.asarray(v, dtype=np.float32) for k, v in embs.items()}
+    order = sorted(talk, key=lambda k: -talk[k])
+    limit = num_speakers if num_speakers and num_speakers > 0 else 99
+    seeds: list[int] = []
+    for k in order:
+        if len(seeds) >= limit:
+            break
+        if k not in vec or talk[k] < SEED_MIN_SHARE * total:
+            continue
+        if all(float(np.dot(vec[k], vec[s])) < SEED_MAX_SIM for s in seeds):
+            seeds.append(k)
+    for k in order:  # notfalls auffüllen, damit es genug Hauptsprecher gibt
+        if len(seeds) >= min(limit, len(order)) or limit == 99:
+            break
+        if k not in seeds:
+            seeds.append(k)
+    if not seeds:
+        seeds = [order[0]]
+    label: dict[int, int] = {k: i for i, k in enumerate(seeds)}
+    other = len(seeds)
+    for k in order:
+        if k in label:
+            continue
+        if k in vec:
+            sims = [float(np.dot(vec[k], vec[s])) if s in vec else -1.0 for s in seeds]
+            best = int(np.argmax(sims))
+            label[k] = best if sims[best] >= ASSIGN_MIN_SIM else other
+        else:
+            label[k] = other  # zu kurz für ein Stimmprofil
+    out = [dict(sg, spk=label[sg["spk"]]) for sg in segs]
+    # Hauptsprecher nach Redezeit nummerieren, "Sonstige" bleibt am Ende
+    main_talk = {i: 0.0 for i in range(other)}
+    for sg in out:
+        if sg["spk"] < other:
+            main_talk[sg["spk"]] += sg["e"] - sg["s"]
+    ranking = {old: new for new, old in enumerate(sorted(main_talk, key=lambda i: -main_talk[i]))}
+    ranking[other] = other
+    for sg in out:
+        sg["spk"] = ranking[sg["spk"]]
+        if sg["spk"] == other:
+            sg["other"] = True
+    return _merge_adjacent(out)
+
+
+def _merge_adjacent(segs: list[dict], gap: float = 0.3) -> list[dict]:
+    out: list[dict] = []
+    for sg in sorted(segs, key=lambda x: x["s"]):
+        if out and out[-1]["spk"] == sg["spk"] and sg["s"] - out[-1]["e"] <= gap:
+            out[-1]["e"] = max(out[-1]["e"], sg["e"])
+        else:
+            out.append(dict(sg))
+    return out
 
 
 def diarize_isolated(wav_path, num_speakers: int = 2, progress: ProgressFn | None = None,
@@ -125,17 +204,6 @@ def _isolated_worker(wav_path: str, num_speakers: int, q) -> None:
         q.put(("result", segs, embs))
     except Exception as exc:
         q.put(("error", f"{type(exc).__name__}: {exc}"))
-
-
-def _renumber_by_talk_time(segs: list[dict]) -> list[dict]:
-    """Sprecher 0 = wer am meisten redet (stabile, nachvollziehbare Nummerierung)."""
-    talk: dict[int, float] = {}
-    for s in segs:
-        talk[s["spk"]] = talk.get(s["spk"], 0.0) + s["e"] - s["s"]
-    order = {spk: i for i, spk in enumerate(sorted(talk, key=lambda k: -talk[k]))}
-    for s in segs:
-        s["spk"] = order[s["spk"]]
-    return segs
 
 
 # --------------------------------------------------------------------------- Stimmprofile

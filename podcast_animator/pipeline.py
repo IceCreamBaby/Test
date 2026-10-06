@@ -52,6 +52,8 @@ def speaker_names(p: dict) -> dict[int, str]:
         cid = sp.get("char")
         if cid and cid != "none":
             names[int(sp["spk"])] = get_character(cid).get("name", cid)
+        elif sp.get("other"):
+            names[int(sp["spk"])] = "Sonstige (Werbung/Einspieler)"
         else:
             names[int(sp["spk"])] = f"Sprecher {int(sp['spk']) + 1}"
     return names
@@ -191,6 +193,41 @@ class Pipeline:
         store.update(pid, lambda q: q.update(status="ready"))
         store.set_live(pid, None)
 
+    def rediarize(self, pid: str, cancel: threading.Event, num_speakers: int | None = None,
+                  refind: bool = False) -> None:
+        """Sprecher neu erkennen, ohne neu zu transkribieren."""
+        store = self.store
+        d = store.dir(pid)
+        tr = store.transcript(pid)
+        if not tr:
+            raise RuntimeError("Noch kein Transkript vorhanden – bitte zuerst verarbeiten.")
+        if num_speakers is not None:
+            store.update(pid, lambda q: q["settings"].update(num_speakers=int(num_speakers)))
+        num = int(store.get(pid)["settings"].get("num_speakers") or 0)
+        prog = self._progress(pid, "Sprecher", 0.0, 0.85 if refind else 1.0)
+        words = transcribe._merge_fragments([dict(w) for w in tr["words"]])
+        if num == 1:
+            dur = float(store.get(pid).get("duration") or (words[-1]["e"] if words else 0))
+            segs, embs = [{"s": 0.0, "e": dur, "spk": 0}], {}
+        else:
+            segs, embs = diarize.diarize_isolated(d / "audio16k.wav", num, progress=prog, cancel=cancel)
+        assign_speakers(words, segs)
+        store.save_transcript(pid, {**tr, "words": words, "diarization": segs})
+        speakers = self._speaker_table(None, segs, words)
+        self._auto_map(speakers, embs)
+        (d / "speaker_embeddings.json").write_text(json.dumps({str(k): v for k, v in embs.items()}), encoding="utf-8")
+
+        def fn(q):
+            q["speakers"] = speakers
+            for c in q["clips"]:
+                c["words"] = None  # alte Sprecher-Zuordnungen in bearbeiteten Untertiteln verwerfen
+                if c.get("status") == "done":
+                    c["stale"] = True
+        store.update(pid, fn)
+        if refind:
+            self.find_clips(pid, cancel, self._progress(pid, "Clips", 0.85, 0.15), append=False)
+        store.set_live(pid, None)
+
     def find_clips(self, pid: str, cancel: threading.Event, prog=None, count: int | None = None,
                    use_claude: bool | None = None, min_len: float | None = None, max_len: float | None = None,
                    append: bool = False) -> None:
@@ -218,7 +255,8 @@ class Pipeline:
             words_free, env10, speaker_names(p), count=int(count or s.get("clip_count", 5)),
             min_len=float(min_len or s.get("min_len", 20)), max_len=float(max_len or s.get("max_len", 55)),
             use_claude=bool(s.get("use_claude") if use_claude is None else use_claude), api_key=api_key(),
-            context=load_settings().get("podcast_context", ""), progress=prog)
+            context=load_settings().get("podcast_context", ""), progress=prog,
+            avoid_speakers={sp["spk"] for sp in p.get("speakers", []) if sp.get("other") or sp.get("char") == "none"})
         clips = [new_clip(x.start, x.end, x.title, x.reason, x.score, x.source) for x in sugg]
         clips.sort(key=lambda c: c["start"])
 
@@ -238,25 +276,29 @@ class Pipeline:
                 longest[k] = (sg["s"], sg["e"])
         for w in words:  # Sprecher, die nur in Wörtern auftauchen
             talk.setdefault(w["spk"], 0.0)
+        others = {sg["spk"] for sg in segs if sg.get("other")}
         table = []
-        for k in sorted(talk, key=lambda k: -talk[k]):
+        for k in sorted(talk, key=lambda k: (k in others, -talk[k])):
             s0, e0 = longest.get(k, (0.0, 0.0))
             sample = [round(s0, 2), round(min(e0, s0 + 7.0), 2)]
             text = " ".join(w["w"] for w in words if s0 <= w["s"] < sample[1])[:140]
             table.append({"spk": int(k), "char": None, "talk_time": round(talk[k], 1), "sample": sample,
-                          "sample_text": text, "matched": False})
+                          "sample_text": text, "matched": False, "other": k in others})
         return table
 
     def _auto_map(self, speakers: list[dict], embs: dict[int, list[float]]) -> None:
         defaults = [c for c in load_settings().get("default_chars", ["rezo", "julien", "gast"])]
         available = {c["id"] for c in list_characters()}
         candidates = [c for c in defaults if c in available] + sorted(available - set(defaults))
-        matched = diarize.match_profiles(embs, candidates)
+        others = {sp["spk"] for sp in speakers if sp.get("other")}
+        matched = diarize.match_profiles({k: v for k, v in embs.items() if k not in others}, candidates)
         used = set(matched.values())
         free = [c for c in candidates if c not in used]
         for sp in speakers:
             k = sp["spk"]
-            if k in matched:
+            if sp.get("other"):
+                sp["char"] = "none"  # Werbung/Einspieler bekommen keine Figur
+            elif k in matched:
                 sp["char"] = matched[k]
                 sp["matched"] = True
             elif free:
@@ -382,6 +424,13 @@ class Worker:
                             self.submit("render", job["pid"], cid=c["id"])
                 elif job["kind"] == "render":
                     self.pipeline.render(job["pid"], job["cid"], self.cancel)
+                elif job["kind"] == "rediarize":
+                    self.pipeline.rediarize(job["pid"], self.cancel, num_speakers=job.get("num_speakers"),
+                                            refind=job.get("refind", False))
+                    p = self.store.get(job["pid"])
+                    if job.get("refind") and p and p["settings"].get("auto_render"):
+                        for c in p["clips"]:
+                            self.submit("render", job["pid"], cid=c["id"])
                 elif job["kind"] == "find_clips":
                     self.pipeline.find_clips(job["pid"], self.cancel, count=job.get("count"),
                                              use_claude=job.get("use_claude"), min_len=job.get("min_len"),

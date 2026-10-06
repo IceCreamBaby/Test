@@ -53,7 +53,8 @@ def _norm(word: str) -> str:
 # --------------------------------------------------------------------------- lokale Heuristik
 
 def find_local(words: list[dict], env10: np.ndarray | None, count: int = 5, min_len: float = 20.0,
-               max_len: float = 55.0, speaker_names: dict[int, str] | None = None) -> list[Suggestion]:
+               max_len: float = 55.0, speaker_names: dict[int, str] | None = None,
+               avoid_speakers: set[int] | None = None) -> list[Suggestion]:
     if not words:
         return []
     sents = sentences(words)
@@ -66,7 +67,10 @@ def find_local(words: list[dict], env10: np.ndarray | None, count: int = 5, min_
     excl = np.zeros(n + 1)
     kw = np.zeros(n + 1)
     ad = np.zeros(n + 1)
+    foreign = np.zeros(n + 1)
+    avoid = avoid_speakers or set()
     for i, w in enumerate(words):
+        foreign[i + 1] = foreign[i] + (1 if w.get("spk") in avoid else 0)
         t = _norm(w["w"])
         turn[i + 1] = turn[i] + (1 if i > 0 and w.get("spk") != words[i - 1].get("spk") else 0)
         laugh[i + 1] = laugh[i] + (1 if LAUGH.search(w["w"]) else 0)
@@ -128,7 +132,8 @@ def find_local(words: list[dict], env10: np.ndarray | None, count: int = 5, min_
             ends_clean = 1.0 if re.search(r"[.!?…]$", sents[j].words[-1]["w"]) else 0.0
             score = (1.4 * f_turns + 1.2 * f_laugh + 0.8 * f_excl + 0.9 * f_kw + 0.5 * f_rate + 0.8 * f_bal
                      + 0.35 * max(-1.0, min(1.5, loud)) + 0.35 * min(1.5, dyn) + 0.4 * f_len + 0.3 * ends_clean
-                     - (0.6 if first_word in WEAK_START else 0.0) - 1.2 * min(3.0, f_ad))
+                     - (0.6 if first_word in WEAK_START else 0.0) - 1.2 * min(3.0, f_ad)
+                     - 6.0 * (foreign[b] - foreign[a]) / max(1, nwords))
             reason = []
             if f_laugh > 0:
                 reason.append(f"{int(laugh[b] - laugh[a])}× Lachen")
@@ -155,19 +160,38 @@ def find_local(words: list[dict], env10: np.ndarray | None, count: int = 5, min_
 
 
 def _local_title(ws: list[dict]) -> str:
-    """Kurzer Titel: der prägnanteste Satz (Ausruf/Frage) vom Anfang des Clips."""
-    sents = sentences(ws)
-    best = None
-    for g in sents[: max(3, len(sents) // 2)]:
-        txt = g.text.strip()
-        if 12 <= len(txt) <= 70 and txt.endswith(("!", "?")):
-            best = txt
-            break
-    if best is None:
-        best = sents[0].text if sents else ""
-    if len(best) > 70:
-        best = best[:67].rsplit(" ", 1)[0] + " …"
-    return best[:1].upper() + best[1:] if best else ""
+    """Titel ohne KI: das prägnanteste vollständige Zitat aus dem ersten Teil des Clips („…“)."""
+    if not ws:
+        return ""
+    # Sätze nur nach Satzzeichen/Pausen trennen (Sprecherwechsel ignorieren – die können falsch sein)
+    sents: list[list[dict]] = [[]]
+    for w in ws:
+        if sents[-1] and w["s"] - sents[-1][-1]["e"] > 1.0:
+            sents.append([])
+        sents[-1].append(w)
+        if re.search(r"[.!?…]$", w["w"]):
+            sents.append([])
+    t0, t1 = ws[0]["s"], ws[-1]["e"]
+    best, best_score = "", -1e9
+    for sent in sents:
+        if not sent or sent[0]["s"] > t0 + 0.7 * (t1 - t0):
+            continue
+        text = " ".join(w["w"] for w in sent).strip().rstrip(",;:")
+        if len(sent) < 4 or not 22 <= len(text) <= 85:
+            continue
+        toks = [_norm(w["w"]) for w in sent]
+        score = -abs(len(text) - 45) / 25.0
+        score += 2.0 if text.endswith(("?", "!")) else 0.0
+        score += sum(1.0 for t in toks if t in KEYWORDS)
+        score += 0.5 if any(t in ("du", "ich", "wir", "dich", "mir") for t in toks) else 0.0
+        score -= 1.0 if toks[0] in WEAK_START else 0.0
+        score -= 3.0 * sum(1 for t in toks if t in AD_WORDS)
+        if score > best_score:
+            best, best_score = text, score
+    if not best:
+        return ""
+    best = best[:1].upper() + best[1:]
+    return f"„{best}“"
 
 
 # --------------------------------------------------------------------------- Claude
@@ -266,7 +290,7 @@ def find_clips(words: list[dict], env10: np.ndarray | None, speaker_names: dict[
             note = f"Claude nicht verfügbar ({type(exc).__name__}: {str(exc)[:160]}) – lokale Suche verwendet."
     if progress:
         progress(0.5, "Suche lustige und spannende Stellen …")
-    return find_local(words, env10, count, min_len, max_len, speaker_names), note
+    return find_local(words, env10, count, min_len, max_len, speaker_names, avoid_speakers), note
 
 
 def describe(s: Suggestion) -> str:

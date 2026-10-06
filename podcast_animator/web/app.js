@@ -377,6 +377,7 @@ function renderStatus() {
 function renderSpeakers() {
   const p = CURRENT;
   const el = $("#speakers-card");
+  renderSpeakers.sig = JSON.stringify(p.speakers);
   if (!p.speakers.length) {
     el.innerHTML = `<div class="card-head"><h2>🗣️ Sprecher & Figuren</h2></div><div class="empty">Sprecher werden nach der Transkription erkannt …</div>`;
     return;
@@ -389,7 +390,7 @@ function renderSpeakers() {
       <div class="spk" data-spk="${sp.spk}">
         <div><div class="seat">${seatName(i, p.speakers.length)}</div>
           <button class="ghost" data-play="${sp.spk}" title="Hörprobe">▶</button></div>
-        <div><b>Sprecher ${sp.spk + 1}</b> <span class="muted">· ${dur(sp.talk_time)} Redezeit</span>
+        <div><b>${sp.other ? "Sonstige Stimmen" : `Sprecher ${sp.spk + 1}`}</b> <span class="muted">· ${dur(sp.talk_time)}${sp.other ? " (z.B. Werbung, Einspieler)" : " Redezeit"}</span>
           ${sp.matched ? '<span class="badge ok">Stimme wiedererkannt</span>' : ""}
           <div class="sample">„${esc(sp.sample_text)}“</div></div>
         <select data-char>${opt("none", "– keine Figur –", sp.char)}${chars.map((c) => opt(c.id, c.name, sp.char)).join("")}</select>
@@ -398,7 +399,15 @@ function renderSpeakers() {
     <audio id="spk-audio" hidden></audio>
     <div class="row" style="margin-top:10px">
       <label class="check"><input type="checkbox" id="remember" checked> Stimmen für nächste Podcasts merken</label>
-      <div class="spacer"></div><button id="save-speakers">Zuordnung speichern</button></div>`;
+      <div class="spacer"></div><button id="save-speakers">Zuordnung speichern</button></div>
+    <details class="adv"><summary>Stimmen falsch erkannt? Sprecher neu erkennen</summary>
+      <div class="row">
+        <label class="field">Anzahl Sprecher<select id="rd-n">${[[2, "2"], [3, "3 (mit Gast)"], [0, "automatisch"]].map(([v, l]) => opt(v, l, p.settings.num_speakers)).join("")}</select></label>
+        <label class="check" style="align-self:end;padding-bottom:8px"><input type="checkbox" id="rd-refind"> danach Clips neu suchen</label>
+        <button id="rd-go" style="align-self:end">🔄 Neu erkennen</button>
+      </div>
+      <div class="hint">Die Transkription bleibt erhalten – das dauert nur ein paar Minuten.</div>
+    </details>`;
   $$("[data-play]", el).forEach((b) => (b.onclick = () => {
     const sp = p.speakers.find((s) => String(s.spk) === b.dataset.play);
     const a = $("#spk-audio");
@@ -407,6 +416,12 @@ function renderSpeakers() {
   }));
   $$("[data-up]", el).forEach((b) => (b.onclick = () => { const row = b.closest(".spk"); if (row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling); }));
   $$("[data-down]", el).forEach((b) => (b.onclick = () => { const row = b.closest(".spk"); if (row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row); }));
+  $("#rd-go").onclick = async () => {
+    if (!confirm("Sprecher neu erkennen? Manuelle Untertitel-Korrekturen in den Clips werden dabei zurückgesetzt.")) return;
+    await api(`/api/projects/${p.id}/rediarize`, { json: { num_speakers: +$("#rd-n").value, refind: $("#rd-refind").checked } });
+    toast("Sprecher werden neu erkannt – das dauert ein paar Minuten …");
+    refreshProject();
+  };
   $("#save-speakers").onclick = async () => {
     const speakers = $$(".spk", el).map((row) => ({ spk: +row.dataset.spk, char: $("[data-char]", row).value }));
     try {
@@ -512,10 +527,9 @@ async function refreshProject(silent = false) {
   const pid = CURRENT.id;
   const p = await api(`/api/projects/${pid}`);
   if (!CURRENT || CURRENT.id !== pid) return;
-  const hadSpeakers = CURRENT.speakers.length;
   CURRENT = p;
   renderStatus();
-  if (!hadSpeakers && p.speakers.length) renderSpeakers();
+  if (JSON.stringify(p.speakers) !== renderSpeakers.sig) renderSpeakers();
   renderClips();
 }
 
@@ -588,7 +602,12 @@ async function addClipDialog(pid) {
 }
 
 function spkChar(spk) { const sp = (CURRENT?.speakers || []).find((s) => s.spk === spk); return sp ? sp.char : null; }
-function spkName(spk) { const c = spkChar(spk); return c && c !== "none" ? charName(c) : `Sprecher ${spk + 1}`; }
+function spkName(spk) {
+  const c = spkChar(spk);
+  if (c && c !== "none") return charName(c);
+  const sp = (CURRENT?.speakers || []).find((s) => s.spk === spk);
+  return sp?.other ? "Sonstige" : `Sprecher ${spk + 1}`;
+}
 
 // --------------------------------------------------------------------------- Clip-Editor
 async function clipEditor(pid, cid) {

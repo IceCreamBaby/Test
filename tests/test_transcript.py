@@ -75,3 +75,23 @@ def test_transcribe_resume_offsets(monkeypatch):
     assert seen["len"] == 16000 * 6
     assert [w["w"] for w in res["words"]] == ["alt", "neu"]
     assert res["words"][1]["s"] == 5.0
+
+
+def test_merge_hyphen_fragments():
+    from podcast_animator.transcribe import _merge_fragments
+
+    words = [{"w": "Nano", "s": 1.0, "e": 1.3, "p": 0.9}, {"w": "-Bots.", "s": 1.3, "e": 1.7, "p": 0.8},
+             {"w": "-", "s": 2.0, "e": 2.1, "p": 0.5}]
+    out = _merge_fragments(words)
+    assert [w["w"] for w in out] == ["Nano-Bots.", "-"]
+    assert out[0]["e"] == 1.7
+
+
+def test_local_title_picks_full_quote():
+    from conftest import make_words
+    from podcast_animator.highlights import _local_title
+
+    ws = make_words([(0, "Für mich sind nur Daten.", 0, 2), (0, "Können wir noch ein Data Center", 2, 4),
+                     (1, "bauen, bitte?", 4, 5), (0, "Ja safe.", 5, 6), (1, "Und dann ging es halt weiter so.", 6, 9),
+                     (0, "Das ist das Ende von dem Clip hier jetzt.", 9, 20)])
+    assert _local_title(ws) == "„Können wir noch ein Data Center bauen, bitte?“"

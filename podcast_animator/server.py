@@ -233,6 +233,14 @@ def create_app() -> FastAPI:
         remembered = worker.pipeline.remember_voices(pid) if body.get("remember", True) else 0
         return {"ok": True, "remembered": remembered}
 
+    @app.post("/api/projects/{pid}/rediarize")
+    def rediarize(pid: str, body: dict = Body(default={})):
+        project_or_404(pid)
+        n = body.get("num_speakers")
+        worker.submit("rediarize", pid, num_speakers=int(n) if n is not None else None,
+                      refind=bool(body.get("refind", False)))
+        return {"ok": True}
+
     @app.get("/api/projects/{pid}/audio")
     def audio(pid: str, start: float, end: float):
         project_or_404(pid)
