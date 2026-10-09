@@ -20,7 +20,7 @@ from .pipeline import Worker, clip_words, default_settings, new_clip
 from .render.characters import DEFAULT_STYLE, get_character, list_characters, save_character
 from .render.scene import THEMES
 from .render.video import RenderOptions, character_preview
-from .store import ProjectStore, api_key, load_settings, save_settings
+from .store import ProjectStore, ai_config, load_settings, save_settings
 from .transcript import retime_text, sentences
 
 log = logging.getLogger(__name__)
@@ -62,6 +62,7 @@ def create_app() -> FastAPI:
     @app.get("/api/state")
     def state():
         s = load_settings()
+        ai = ai_config(s)
         return {
             "projects": store.list(),
             "worker": worker.status(),
@@ -72,10 +73,13 @@ def create_app() -> FastAPI:
             "themes": list(THEMES),
             "models": transcribe.MODEL_CHOICES,
             "cuda": transcribe.cuda_available(),
-            "settings": {"watermark": s["watermark"], "sign_text": s["sign_text"], "has_key": bool(api_key()),
+            "settings": {"watermark": s["watermark"], "sign_text": s["sign_text"],
                          "podcast_context": s["podcast_context"], "default_chars": s["default_chars"],
                          "hotwords": s.get("hotwords", ""),
-                         "key_hint": ("…" + s["anthropic_api_key"][-4:]) if s.get("anthropic_api_key") else ""},
+                         "ai_provider": s.get("ai_provider", "gemini"), "gemini_model": s.get("gemini_model", ""),
+                         "has_ai": ai["available"], "ai_name": ai["name"], "ai_active": ai["provider"],
+                         "claude_key_hint": _hint(s.get("anthropic_api_key")),
+                         "gemini_key_hint": _hint(s.get("gemini_api_key"))},
             "defaults": default_settings(),
             "data_dir": str(DATA_DIR),
         }
@@ -161,7 +165,7 @@ def create_app() -> FastAPI:
         project_or_404(pid)
 
         def fn(q):
-            for k in ("num_speakers", "model", "mode", "clip_count", "min_len", "max_len", "use_claude"):
+            for k in ("num_speakers", "model", "mode", "clip_count", "min_len", "max_len", "use_ai"):
                 if k in body:
                     q["settings"][k] = body[k]
             q["status"] = "new"
@@ -275,7 +279,7 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{pid}/find_clips")
     def find_clips(pid: str, body: dict = Body(default={})):
         project_or_404(pid)
-        worker.submit("find_clips", pid, count=body.get("count"), use_claude=body.get("use_claude"),
+        worker.submit("find_clips", pid, count=body.get("count"), use_ai=body.get("use_ai", body.get("use_claude")),
                       min_len=body.get("min_len"), max_len=body.get("max_len"), append=body.get("append", True))
         return {"ok": True}
 
@@ -401,6 +405,10 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": str(exc)}, status_code=500)
 
     return app
+
+
+def _hint(key: str | None) -> str:
+    return ("…" + key[-4:]) if key else ""
 
 
 def _words_from_lines(words: list[dict], lines: list[dict]) -> list[dict]:

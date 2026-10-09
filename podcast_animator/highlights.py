@@ -194,7 +194,11 @@ def _local_title(ws: list[dict]) -> str:
     return f"„{best}“"
 
 
-# --------------------------------------------------------------------------- Claude
+# --------------------------------------------------------------------------- KI (Claude oder Gemini)
+
+GEMINI_DEFAULT_MODEL = "gemini-flash-latest"
+PROVIDER_NAMES = {"claude": "Claude", "gemini": "Gemini"}
+
 
 def transcript_for_llm(words: list[dict], speaker_names: dict[int, str]) -> str:
     lines = []
@@ -204,9 +208,7 @@ def transcript_for_llm(words: list[dict], speaker_names: dict[int, str]) -> str:
     return "\n".join(lines)
 
 
-def find_with_claude(words: list[dict], speaker_names: dict[int, str], count: int = 5, min_len: float = 20.0,
-                     max_len: float = 55.0, api_key: str | None = None, context: str = "") -> list[Suggestion]:
-    import anthropic
+def _clip_schema():
     from pydantic import BaseModel, Field
 
     class Clip(BaseModel):
@@ -219,6 +221,11 @@ def find_with_claude(words: list[dict], speaker_names: dict[int, str], count: in
     class ClipList(BaseModel):
         clips: list[Clip]
 
+    return ClipList
+
+
+def _clip_prompts(words: list[dict], speaker_names: dict[int, str], count: int, min_len: float, max_len: float,
+                  context: str) -> tuple[str, str]:
     transcript = transcript_for_llm(words, speaker_names)
     system = (
         "Du bist ein erfahrener Editor für deutschsprachige YouTube Shorts und schneidest Podcast-Highlights. "
@@ -235,6 +242,27 @@ def find_with_claude(words: list[dict], speaker_names: dict[int, str], count: in
         f"Die Ausschnitte dürfen sich nicht überschneiden. Sortiere nach Viral-Potenzial (beste zuerst).\n\n"
         f"<transkript>\n{transcript}\n</transkript>"
     )
+    return system, user
+
+
+def _to_suggestions(clips, words: list[dict], count: int, source: str) -> list[Suggestion]:
+    out: list[Suggestion] = []
+    for c in clips:
+        s, e = snap_to_words(words, c.start, c.end)
+        if e - s < 5:
+            continue
+        if any(min(e, o.end) - max(s, o.start) > 0.2 * min(e - s, o.end - o.start) for o in out):
+            continue
+        out.append(Suggestion(s, e, float(c.score), c.title.strip()[:90], c.reason.strip(), source))
+    return out[:count]
+
+
+def find_with_claude(words: list[dict], speaker_names: dict[int, str], count: int = 5, min_len: float = 20.0,
+                     max_len: float = 55.0, api_key: str | None = None, context: str = "") -> list[Suggestion]:
+    import anthropic
+
+    ClipList = _clip_schema()
+    system, user = _clip_prompts(words, speaker_names, count, min_len, max_len, context)
     client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
     response = client.beta.messages.parse(
         model=CLAUDE_MODEL,
@@ -250,15 +278,71 @@ def find_with_claude(words: list[dict], speaker_names: dict[int, str], count: in
         raise RuntimeError("Claude hat die Anfrage abgelehnt.")
     if response.stop_reason == "max_tokens" or response.parsed_output is None:
         raise RuntimeError("Claude hat keine gültige Antwort geliefert.")
-    out: list[Suggestion] = []
-    for c in response.parsed_output.clips:
-        s, e = snap_to_words(words, c.start, c.end)
-        if e - s < 5:
+    return _to_suggestions(response.parsed_output.clips, words, count, "Claude")
+
+
+def find_with_gemini(words: list[dict], speaker_names: dict[int, str], count: int = 5, min_len: float = 20.0,
+                     max_len: float = 55.0, api_key: str | None = None, context: str = "",
+                     model: str | None = None) -> list[Suggestion]:
+    from google import genai
+    from google.genai import errors, types
+
+    if not api_key:
+        raise RuntimeError("Kein Gemini-API-Key eingetragen.")
+    ClipList = _clip_schema()
+    system, user = _clip_prompts(words, speaker_names, count, min_len, max_len, context)
+    client = genai.Client(api_key=api_key)
+    config = types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
+                                         response_schema=ClipList)
+    model = (model or GEMINI_DEFAULT_MODEL).strip()
+    try:
+        response = client.models.generate_content(model=model, contents=user, config=config)
+    except errors.ClientError as exc:
+        if exc.code != 404:
+            raise
+        # Modellname veraltet (Google benennt Modelle regelmäßig um) -> neuestes Flash-Modell automatisch wählen
+        fallback = _newest_flash_model(client)
+        if not fallback or fallback == model:
+            raise
+        log.info("Gemini-Modell %s nicht gefunden, verwende %s", model, fallback)
+        response = client.models.generate_content(model=fallback, contents=user, config=config)
+    parsed = response.parsed
+    if parsed is None:
+        text = response.text or ""
+        if not text.strip():
+            raise RuntimeError("Gemini hat keine gültige Antwort geliefert.")
+        parsed = ClipList.model_validate_json(text)
+    elif isinstance(parsed, dict):
+        parsed = ClipList.model_validate(parsed)
+    return _to_suggestions(parsed.clips, words, count, "Gemini")
+
+
+def _newest_flash_model(client) -> str | None:
+    """Sucht das neueste normale Flash-Modell (ohne Lite/Bild/Audio/Vorschau) aus der Modellliste."""
+    best: tuple[tuple, str] | None = None
+    for m in client.models.list():
+        name = (m.name or "").removeprefix("models/")
+        actions = m.supported_actions or []
+        if "flash" not in name or "generateContent" not in actions:
             continue
-        if any(min(e, o.end) - max(s, o.start) > 0.2 * min(e - s, o.end - o.start) for o in out):
+        if any(x in name for x in ("lite", "image", "tts", "live", "audio", "exp", "preview", "latest")):
             continue
-        out.append(Suggestion(s, e, float(c.score), c.title.strip()[:90], c.reason.strip(), "Claude"))
-    return out[:count]
+        version = tuple(int(v) for v in re.findall(r"\d+", name.split("flash")[0]))
+        if best is None or version > best[0]:
+            best = (version, name)
+    return best[1] if best else None
+
+
+def _ai_error_note(provider: str, exc: Exception) -> str:
+    name = PROVIDER_NAMES.get(provider, provider)
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code == 429:
+        hint = "Limit erreicht (bei Gemini kostenlos: Tageslimit – morgen wieder oder später erneut versuchen)"
+    elif code in (401, 403) or "API key" in str(exc) or "api_key" in str(exc):
+        hint = "API-Key ungültig – bitte in den Einstellungen prüfen"
+    else:
+        hint = f"{type(exc).__name__}: {str(exc)[:160]}"
+    return f"{name} nicht verfügbar ({hint}) – lokale Suche verwendet."
 
 
 def snap_to_words(words: list[dict], start: float, end: float) -> tuple[float, float]:
@@ -273,22 +357,26 @@ def snap_to_words(words: list[dict], start: float, end: float) -> tuple[float, f
 
 
 def find_clips(words: list[dict], env10: np.ndarray | None, speaker_names: dict[int, str], count: int = 5,
-               min_len: float = 20.0, max_len: float = 55.0, use_claude: bool = False, api_key: str | None = None,
-               context: str = "", progress=None,
+               min_len: float = 20.0, max_len: float = 55.0, use_ai: bool = False, provider: str = "claude",
+               api_key: str | None = None, model: str | None = None, context: str = "", progress=None,
                avoid_speakers: set[int] | None = None) -> tuple[list[Suggestion], str]:
-    """Gibt (Vorschläge, Hinweistext) zurück. Fällt bei Problemen mit Claude auf die lokale Suche zurück."""
+    """Gibt (Vorschläge, Hinweistext) zurück. Fällt bei Problemen mit der KI auf die lokale Suche zurück."""
     note = ""
-    if use_claude:
+    if use_ai:
+        name = PROVIDER_NAMES.get(provider, provider)
         try:
             if progress:
-                progress(0.2, "Claude sucht die besten Stellen …")
-            res = find_with_claude(words, speaker_names, count, min_len, max_len, api_key, context)
+                progress(0.2, f"{name} sucht die besten Stellen …")
+            if provider == "gemini":
+                res = find_with_gemini(words, speaker_names, count, min_len, max_len, api_key, context, model)
+            else:
+                res = find_with_claude(words, speaker_names, count, min_len, max_len, api_key, context)
             if res:
-                return res, "Clips von Claude ausgewählt."
-            note = "Claude hat keine Clips geliefert – lokale Suche verwendet."
+                return res, f"Clips von {name} ausgewählt."
+            note = f"{name} hat keine Clips geliefert – lokale Suche verwendet."
         except Exception as exc:  # Netzwerk, Key, Limits …
-            log.warning("Claude-Clipsuche fehlgeschlagen: %s", exc)
-            note = f"Claude nicht verfügbar ({type(exc).__name__}: {str(exc)[:160]}) – lokale Suche verwendet."
+            log.warning("KI-Clipsuche (%s) fehlgeschlagen: %s", provider, exc)
+            note = _ai_error_note(provider, exc)
     if progress:
         progress(0.5, "Suche lustige und spannende Stellen …")
     return find_local(words, env10, count, min_len, max_len, speaker_names, avoid_speakers), note

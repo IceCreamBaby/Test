@@ -57,7 +57,7 @@ def cmd_process(args) -> None:
         "clip_count": args.clips,
         "min_len": args.min_len,
         "max_len": args.max_len,
-        "use_claude": args.claude,
+        "use_ai": args.ai,
     })
     if args.start or args.end:
         settings["range"] = [media.parse_ts(args.start), media.parse_ts(args.end)]
@@ -127,7 +127,8 @@ def main(argv: list[str] | None = None) -> None:
     pp.add_argument("--model", help="Whisper-Modell: base, small, medium, large-v3-turbo")
     pp.add_argument("--speakers", type=int, default=2, help="Anzahl Sprecher (0 = automatisch)")
     pp.add_argument("--chars", help="Figuren in Sprecher-Reihenfolge, z.B. rezo,julien")
-    pp.add_argument("--claude", action="store_true", help="Clips mit Claude auswählen (API-Key nötig)")
+    pp.add_argument("--ai", "--claude", "--gemini", dest="ai", action="store_true",
+                    help="Clips mit KI auswählen (Gemini oder Claude, API-Key in den Einstellungen nötig)")
     pp.add_argument("--layout", default="studio", choices=["studio", "split"])
     pp.add_argument("--theme", default="lila")
     pp.add_argument("--out", help="Ausgabeordner für die fertigen Videos")
