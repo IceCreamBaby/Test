@@ -131,7 +131,7 @@ details.adv[open] summary { margin-bottom: 12px; }
 .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; width: min(1100px, 100%); padding: 22px; }
 .modal .close { float: right; }
 .editor { display: grid; grid-template-columns: 300px 1fr; gap: 20px; }
-@media (max-width: 860px) { .editor { grid-template-columns: 1fr; } }
+@media (max-width: 860px) { .editor { grid-template-columns: 1fr; } .editor .preview { max-width: 300px; width: 100%; margin: 0 auto; } }
 .editor .preview img { width: 100%; border-radius: 12px; border: 1px solid var(--line); background: #000; aspect-ratio: 9/16; object-fit: cover; }
 .lines { max-height: 52vh; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
 .line { display: grid; grid-template-columns: 62px 130px 1fr; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); align-items: center; }
@@ -155,3 +155,16 @@ details.adv[open] summary { margin-bottom: 12px; }
 .toast.err { border-left-color: var(--err); }
 .empty { text-align: center; color: var(--muted); padding: 30px; }
 .hint { font-size: 13px; color: var(--muted); }
+
+.line.new { background: rgba(255, 79, 216, .08); }
+.editor > * { min-width: 0; }
+.timeline-wrap { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: rgba(255, 255, 255, .02); }
+.tl-toolbar { margin-bottom: 8px; }
+.timeline { display: grid; grid-template-columns: 100px minmax(0, 1fr); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #14111f; }
+.tl-labels { border-right: 1px solid var(--line); background: var(--panel-2); }
+.tl-label { display: flex; align-items: center; gap: 6px; padding: 0 8px; font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; }
+.tl-scroll { overflow-x: auto; overflow-y: hidden; outline: none; }
+.tl-scroll:focus { box-shadow: inset 0 0 0 2px rgba(62, 224, 255, .35); }
+.tl-scroll canvas { display: block; }
+.tl-selection { margin-top: 8px; min-height: 36px; }
+.tl-remove { margin-left: auto; padding: 0 6px; min-height: 0; line-height: 18px; font-size: 12px; }

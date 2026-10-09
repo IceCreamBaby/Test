@@ -56,9 +56,27 @@ Beim ersten Verarbeiten lädt das Programm einmalig die KI-Modelle herunter (Spr
    Stimmt die Aufteilung gar nicht (z.B. Gast dabei), klappe „Sprecher neu erkennen“ auf – das dauert nur ein paar
    Minuten, die Transkription bleibt erhalten.
 5. **Clip bearbeiten (✏️):** Start/Ende verschieben, Titel ändern, Untertitel korrigieren, einzelne Zeilen einem anderen
-   Sprecher zuordnen, Layout pro Clip wählen, Vorschau-Bild an beliebiger Stelle ansehen.
+   Sprecher zuordnen, Layout pro Clip wählen, Vorschau-Bild an beliebiger Stelle ansehen. Reden mehrere gleichzeitig,
+   hilft die **🎚️ Zeitleiste** (siehe unten).
 6. **⬇ MP4** herunterladen oder **📁 Ordner öffnen** – und hochladen. Die **SRT**-Datei kannst du bei YouTube als
    Untertitel hochladen (für die Suche/Barrierefreiheit).
+
+### Durcheinanderreden & weitere Personen (🎚️ Zeitleiste)
+
+Whisper schreibt bei Durcheinanderreden meist nur eine Stimme mit – dann bewegt in der Animation auch nur eine Figur
+den Mund. Im Clip-Editor (✏️) gibt es dafür die Zeitleiste:
+
+- **Oben die Wellenform** des Clips (Klick = an diese Stelle springen, ▶ Abspielen, Zoom bis 8×),
+  darunter **eine Spur pro Person**. Blasse Balken = was automatisch erkannt wurde.
+- **In einer Spur ziehen** = diese Person spricht dort – auch gleichzeitig mit jemand anderem. Bereiche lassen sich
+  anklicken, verschieben, an den Rändern länger/kürzer ziehen und mit `Entf` oder 🗑 löschen.
+- **＋ Person hinzufügen:** holt eine weitere Figur (z.B. „Gast“ oder eine selbst angelegte) nur in diesen Clip –
+  sie bekommt einen eigenen Platz am Tisch und eine eigene Spur. Mit ✕ neben dem Namen wieder entfernen.
+- **💬 Text dazu:** schreibt für den ausgewählten Bereich auf, was die Person dort sagt (wenn Whisper es überhört
+  hat). Der Text erscheint als eigener Untertitel; reden zwei gleichzeitig, stehen beide Untertitel übereinander.
+- Wo sich Personen überlappen, zeigt die Kamera automatisch die Totale, damit man beide reden sieht.
+
+Danach **💾 Speichern & rendern**. Bitte nur aufschreiben, was im Originalton wirklich gesagt wird.
 
 ### Layouts und Stil
 
@@ -161,7 +179,8 @@ uv run python -m podcast_animator process folge.mp4 --ai --chars rezo,julien
 | Sprecher vertauscht | Unter „Sprecher & Figuren“ die Figuren tauschen, speichern, „Alle rendern“. |
 | Sprecher falsch aufgeteilt | „Sprecher & Figuren“ → „Sprecher neu erkennen“ (ggf. mit 3 Sprechern oder „automatisch“). |
 | Falsche Wörter in den Untertiteln | Clip bearbeiten → Text korrigieren, oder ein größeres Whisper-Modell wählen. |
-| Mehr als 2 Personen | Beim Erstellen unter „Erweitert“ die Sprecheranzahl auf 3 oder „automatisch“ stellen. |
+| Mehr als 2 Personen | Beim Erstellen unter „Erweitert“ die Sprecheranzahl auf 3 oder „automatisch“ stellen – oder im Clip-Editor „＋ Person hinzufügen“. |
+| Beide reden durcheinander, aber nur einer bewegt den Mund | Clip bearbeiten → 🎚️ Zeitleiste: in der Spur der zweiten Person ziehen, wo sie mitredet. |
 | Port 7860 belegt | `start.bat --port 7861` |
 
 ## Hinweise zu Rechten

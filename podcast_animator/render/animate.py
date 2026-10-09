@@ -61,7 +61,10 @@ class Animator:
     """Erzeugt CharState-Objekte für alle Figuren und Frames."""
 
     def __init__(self, words: list[dict], env: np.ndarray, fps: float, n_frames: int, slot_of_spk: dict[int, int],
-                 slots_inner: list[int], liveliness: float = 1.0, seed: int = 3):
+                 slots_inner: list[int], liveliness: float = 1.0, seed: int = 3, regions: list[dict] | None = None):
+        """regions: von Hand eingezeichnete Sprechbereiche [{spk, s, e}] (Clip-Zeit) – dort bewegt die Figur
+        den Mund auch ohne erkannte Wörter, z.B. wenn beide gleichzeitig reden."""
+        self.regions = regions or []
         self.fps = fps
         self.n = n_frames
         self.words = words
@@ -101,6 +104,15 @@ class Animator:
             for w1, w2 in zip(ws, ws[1:]):
                 if 0 < w2["s"] - w1["e"] < 0.3:
                     active[slot, int(w1["e"] * fps):int(math.ceil(w2["s"] * fps))] = 1.0
+        # von Hand eingezeichnete Sprechbereiche
+        self.forced = np.zeros((S, n), dtype=bool)
+        for r in self.regions:
+            slot = self.slot_of_spk.get(r.get("spk"))
+            if slot is None or slot >= S:
+                continue
+            a, b = max(0, int(r["s"] * fps)), min(n, math.ceil(r["e"] * fps))
+            active[slot, a:b] = 1.0
+            self.forced[slot, a:b] = True
         self.active = active
         env = self.env
         opening = np.clip((env - 0.06) / 0.75, 0.0, 1.0) ** 0.75
@@ -227,6 +239,9 @@ class Animator:
             letters = _letters(w["w"])
             p = (t - w["s"]) / max(0.05, w["e"] - w["s"])
             viseme = viseme_for_char(letters[min(len(letters) - 1, max(0, int(p * len(letters))))])
+        elif talk > 0.05 and self.forced[s, f]:
+            # eingezeichneter Bereich ohne Wörter: abwechslungsreiche Mundformen im Silbentakt
+            viseme = "AEOCAMEO"[(int(t * 7.5) + 3 * s) % 8]
         head_dy = (-7 * talk + 2.0 * math.sin(t * 2.3 + ph)) * live + 9 * nod
         head_rot = (math.sin(t * 1.25 + ph) * (2.6 if speaking else 1.2) + gaze * 3.5) * live
         if laugh > 0.2:

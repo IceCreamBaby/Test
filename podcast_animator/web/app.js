@@ -615,12 +615,27 @@ async function clipEditor(pid, cid) {
   const c = CURRENT.clips.find((x) => x.id === cid);
   const r = c.render || {};
   const data = await api(`/api/projects/${pid}/clips/${cid}/lines`);
-  const speakers = CURRENT.speakers;
+  const dur = c.end - c.start;
+  // Arbeitskopien (werden beim Speichern geschickt)
+  const tracks = data.tracks.map((t) => ({ ...t }));
+  const extras = (data.extra_speakers || []).map((x) => ({ ...x }));
+  const regions = (data.regions || []).map((x) => ({ ...x }));
+  const lines = data.lines.map((l) => ({ ...l }));
+  const origLines = data.lines.map((l) => ({ ...l }));
+  const trackOf = (spk) => tracks.find((t) => t.spks.includes(spk));
+  const nameOf = (spk) => (trackOf(spk) ? trackOf(spk).name : spk === -1 ? "wie erkannt" : spkName(spk));
+  const spkOptions = (sel) => {
+    const seen = new Set();
+    let html = "";
+    for (const t of tracks) { html += opt(t.spk, t.name, trackOf(sel) === t ? t.spk : sel); t.spks.forEach((k) => seen.add(k)); }
+    for (const l of lines) if (!seen.has(l.spk)) { seen.add(l.spk); html += opt(l.spk, nameOf(l.spk), sel); }
+    return html;
+  };
   const m = openModal(`<h2>✏️ Clip bearbeiten</h2>
     <div class="editor">
       <div class="preview stack">
         <img id="ed-img" alt="Vorschau">
-        <input type="range" id="ed-t" min="0" max="${(c.end - c.start).toFixed(1)}" step="0.1" value="${((c.end - c.start) * 0.3).toFixed(1)}">
+        <input type="range" id="ed-t" min="0" max="${dur.toFixed(1)}" step="0.1" value="${(dur * 0.3).toFixed(1)}">
         <div class="row"><button id="ed-prev">🖼️ Vorschau aktualisieren</button></div>
         <audio id="ed-audio" controls style="width:100%" src="/api/projects/${pid}/audio?start=${c.start}&end=${c.end}"></audio>
       </div>
@@ -632,31 +647,113 @@ async function clipEditor(pid, cid) {
           <label class="field">Layout<select id="ed-layout">${opt("", "wie Projekt", r.layout || "")}${opt("studio", "Studio", r.layout)}${opt("split", "Split-Screen", r.layout)}</select></label>
           <label class="field">Thema<select id="ed-theme">${opt("", "wie Projekt", r.theme || "")}${STATE.themes.map((t) => opt(t, THEME_NAMES[t] || t, r.theme)).join("")}</select></label>
         </div>
+        <div class="timeline-wrap">
+          <div class="row" style="margin-bottom:6px">
+            <b>🎚️ Zeitleiste – wer spricht wann?</b>
+            <span class="hint">In einer Spur ziehen = diese Person spricht dort (auch gleichzeitig mit anderen). Klick in die Wellenform = springen.</span>
+          </div>
+          <div class="row tl-toolbar">
+            <button id="tl-play">▶ Abspielen</button>
+            <label class="row" style="gap:6px">Zoom <select id="tl-zoom">${[1, 2, 4, 8].map((z) => opt(z, `${z}×`, 1)).join("")}</select></label>
+            <span class="spacer"></span>
+            <select id="tl-add-char"></select><button id="tl-add">＋ Person hinzufügen</button>
+          </div>
+          <div class="timeline"><div class="tl-labels" id="tl-labels"></div><div class="tl-scroll" id="tl-scroll" tabindex="0"><canvas id="tl-canvas"></canvas></div></div>
+          <div class="row tl-selection" id="tl-sel"></div>
+        </div>
         <div><div class="row"><b>Untertitel & Sprecher</b><span class="hint">Text korrigieren oder Sprecher einer Zeile ändern. Leere Zeile = kein Untertitel.</span>
           <div class="spacer"></div>${data.edited ? '<button class="ghost" id="ed-reset">↺ Original wiederherstellen</button>' : ""}</div></div>
-        <div class="lines" id="ed-lines">${data.lines.map((l, i) => `
-          <div class="line" data-i="${i}">
-            <span class="t" data-seek="${l.s}" title="Anhören">▶ ${ts(l.s - c.start)}</span>
-            <select data-spk>${speakers.map((sp) => opt(sp.spk, spkName(sp.spk), l.spk)).join("")}</select>
-            <input type="text" data-text value="${esc(l.text)}">
-          </div>`).join("") || '<div class="empty">Keine Wörter in diesem Bereich.</div>'}</div>
-        <div class="row"><div class="spacer"></div>
-          <button id="ed-save">💾 Speichern</button>
-          <button class="primary" id="ed-save-render">💾 Speichern & rendern</button></div>
+        <div class="lines" id="ed-lines"></div>
       </div>
-    </div>`);
-  const lines = data.lines;
+    </div>
+    <div class="row" style="margin-top:12px"><div class="spacer"></div>
+      <button id="ed-save">💾 Speichern</button>
+      <button class="primary" id="ed-save-render">💾 Speichern & rendern</button></div>`);
+  const audio = $("#ed-audio");
+
+  // ---------------- Zeilenliste
+  const renderLines = () => {
+    $("#ed-lines").innerHTML = lines.map((l, i) => `
+      <div class="line${l.new ? " new" : ""}" data-i="${i}">
+        <span class="t" data-seek="${l.s}" title="Anhören">▶ ${ts(l.s - c.start)}</span>
+        <select data-spk>${spkOptions(l.spk)}</select>
+        <input type="text" data-text value="${esc(l.text)}" placeholder="${l.new ? "neuer Text" : ""}">
+      </div>`).join("") || '<div class="empty">Keine Wörter in diesem Bereich.</div>';
+    $$("#ed-lines .line").forEach((row) => {
+      const l = lines[+row.dataset.i];
+      $("[data-spk]", row).onchange = (e) => { l.spk = +e.target.value; tl.draw(); };
+      $("[data-text]", row).oninput = (e) => { l.text = e.target.value; };
+      $("[data-seek]", row).onclick = () => { audio.currentTime = Math.max(0, l.s - c.start); audio.play(); };
+    });
+  };
+  renderLines();
+
+  // ---------------- Zeitleiste
+  const removePerson = (spk) => {
+    const t = tracks.find((x) => x.spk === spk && x.extra);
+    if (!t || !confirm(`${t.name} wieder aus dem Clip entfernen? Eingezeichnete Bereiche und neue Texte dieser Person gehen verloren.`)) return;
+    tracks.splice(tracks.indexOf(t), 1);
+    extras.splice(extras.findIndex((x) => x.spk === spk), 1);
+    for (let i = regions.length - 1; i >= 0; i--) if (regions[i].spk === spk) regions.splice(i, 1);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].spk !== spk) continue;
+      const l = lines[i];
+      if (l.new) lines.splice(i, 1); else l.spk = l.orig_spk !== spk && trackOf(l.orig_spk) ? l.orig_spk : -1;
+    }
+    tl.clearSelection(); tl.layout(); renderAddPerson(); renderLines(); renderSelection();
+  };
+  const tl = timeline({ c, dur, pid, tracks, regions, lines, audio, onSelect: () => renderSelection(), onChange: () => renderAddPerson(), onRemove: removePerson });
+  const renderAddPerson = () => {
+    const free = STATE.characters.filter((ch) => !tracks.some((t) => t.char === ch.id));
+    $("#tl-add-char").innerHTML = free.map((ch) => opt(ch.id, ch.name, "")).join("") || opt("", "– alle dabei –", "");
+    $("#tl-add").disabled = !free.length;
+    $("#tl-add").title = free.length ? "" : "Alle Figuren sind schon im Clip – weitere Figuren unter „Figuren“ anlegen.";
+  };
+  renderAddPerson();
+  $("#tl-add").onclick = () => {
+    const charId = $("#tl-add-char").value;
+    if (!charId) return;
+    const ch = STATE.characters.find((x) => x.id === charId);
+    const spk = Math.max(999, ...extras.map((x) => x.spk)) + 1;
+    extras.push({ spk, char: charId });
+    tracks.push({ spk, spks: [spk], char: charId, name: ch.name, color: ch.color, extra: true });
+    tl.layout();
+    renderAddPerson();
+    renderLines();
+    toast(`${ch.name} hinzugefügt – jetzt in der neuen Spur ziehen, wo ${ch.name} spricht.`);
+  };
+  const renderSelection = () => {
+    const sel = tl.selected();
+    if (!sel) { $("#tl-sel").innerHTML = '<span class="hint">Tipp: Bereich anklicken zum Auswählen; Ränder ziehen zum Ändern; Entf-Taste löscht.</span>'; return; }
+    $("#tl-sel").innerHTML = `<span><b style="color:${esc(trackOf(sel.spk)?.color || "#fff")}">${esc(nameOf(sel.spk))}</b> spricht ${ts(sel.s - c.start)} – ${ts(sel.e - c.start)}</span>
+      <button id="sel-play">▶ Anhören</button><button id="sel-text">💬 Text dazu</button><button class="danger" id="sel-del">🗑 Bereich löschen</button>`;
+    $("#sel-play").onclick = () => { audio.currentTime = sel.s - c.start; audio.play(); tl.stopAt(sel.e - c.start); };
+    $("#sel-del").onclick = () => tl.deleteSelected();
+    $("#sel-text").onclick = () => {
+      const text = prompt(`Was sagt ${nameOf(sel.spk)} hier? (erscheint als Untertitel)`);
+      if (!text || !text.trim()) return;
+      lines.push({ new: true, spk: sel.spk, s: sel.s, e: sel.e, text: text.trim(), orig_spk: null });
+      lines.sort((x, y) => x.s - y.s);
+      renderLines();
+      tl.draw();
+    };
+  };
+  renderSelection();
+  $("#tl-play").onclick = () => { if (audio.paused) audio.play(); else audio.pause(); };
+  audio.onplay = () => ($("#tl-play").textContent = "⏸ Pause");
+  audio.onpause = () => ($("#tl-play").textContent = "▶ Abspielen");
+  $("#tl-zoom").onchange = (e) => tl.setZoom(+e.target.value);
+
+  // ---------------- Vorschau / Zeiten
   const loadPreview = () => { $("#ed-img").src = `/api/projects/${pid}/clips/${cid}/preview.jpg?t=${$("#ed-t").value}&r=${Date.now()}`; };
   loadPreview();
   $("#ed-prev").onclick = loadPreview;
   $("#ed-t").onchange = loadPreview;
-  $$("[data-seek]", m.root).forEach((el) => (el.onclick = () => { const a = $("#ed-audio"); a.currentTime = Math.max(0, +el.dataset.seek - c.start); a.play(); }));
   $$("[data-nudge]", m.root).forEach((b) => (b.onclick = (e) => {
     e.preventDefault();
     const [k, d] = b.dataset.nudge.split(":");
     const input = $(`#ed-${k}`);
-    const v = parseTs(input.value) + Number(d);
-    input.value = ts(Math.max(0, v));
+    input.value = ts(Math.max(0, parseTs(input.value) + Number(d)));
   }));
   if ($("#ed-reset")) $("#ed-reset").onclick = async () => {
     await api(`/api/projects/${pid}/clips/${cid}`, { method: "PATCH", json: { reset_words: true } });
@@ -667,13 +764,10 @@ async function clipEditor(pid, cid) {
     for (const [k, id] of [["layout", "#ed-layout"], ["theme", "#ed-theme"]]) {
       if ($(id).value) render[k] = $(id).value; else delete render[k];
     }
-    const editedLines = $$("#ed-lines .line", m.root).map((row) => {
-      const l = lines[+row.dataset.i];
-      return { s: l.s, e: l.e, spk: +$("[data-spk]", row).value, text: $("[data-text]", row).value };
-    });
-    const changed = editedLines.some((l, i) => l.text !== lines[i].text || l.spk !== lines[i].spk);
-    const body = { title: $("#ed-title").value, start: $("#ed-start").value, end: $("#ed-end").value, render, render_now: renderNow };
-    if (changed) body.lines = editedLines;
+    const changed = lines.length !== origLines.length || lines.some((l, i) => l.new || l.text !== origLines[i]?.text || l.spk !== origLines[i]?.spk);
+    const body = { title: $("#ed-title").value, start: $("#ed-start").value, end: $("#ed-end").value, render, render_now: renderNow,
+      regions, extra_speakers: extras };
+    if (changed) body.lines = lines;
     try {
       await api(`/api/projects/${pid}/clips/${cid}`, { method: "PATCH", json: body });
       toast(renderNow ? "Gespeichert – wird gerendert." : "Gespeichert.");
@@ -683,6 +777,182 @@ async function clipEditor(pid, cid) {
   };
   $("#ed-save").onclick = () => save(false);
   $("#ed-save-render").onclick = () => save(true);
+}
+
+/* Zeitleiste mit Wellenform und einer Spur pro Person. Bereiche in Projektzeit (wie Wörter). */
+function timeline({ c, dur, pid, tracks, regions, lines, audio, onSelect, onChange, onRemove }) {
+  const RULER = 18, WAVE = 56, ROW = 30, EDGE = 6;
+  const canvas = $("#tl-canvas"), scroll = $("#tl-scroll"), labels = $("#tl-labels");
+  const ctx = canvas.getContext("2d");
+  let zoom = 1, pps = 10, peaks = [], selIdx = -1, drag = null, stopAt = null;
+  const dpr = window.devicePixelRatio || 1;
+  const local = (abs) => abs - c.start;
+  const xOf = (abs) => local(abs) * pps;
+  const tOf = (x) => Math.min(dur, Math.max(0, x / pps)) + c.start;
+  const rowOf = (y) => (y < RULER + WAVE ? -1 : Math.floor((y - RULER - WAVE) / ROW));
+  const height = () => RULER + WAVE + tracks.length * ROW + 4;
+
+  let lastW = 0;
+  function layout() {
+    lastW = scroll.clientWidth;
+    const w = Math.max(scroll.clientWidth || 700, Math.round((scroll.clientWidth || 700) * zoom));
+    pps = w / dur;
+    canvas.width = w * dpr; canvas.height = height() * dpr;
+    canvas.style.width = w + "px"; canvas.style.height = height() + "px";
+    labels.style.height = height() + "px";
+    labels.innerHTML = `<div style="height:${RULER + WAVE}px" class="tl-label muted">Ton</div>` +
+      tracks.map((t) => `<div class="tl-label" style="height:${ROW}px"><span class="swatch" style="background:${esc(t.color)}"></span>${esc(t.name)}${t.extra ? ` <button class="ghost tl-remove" data-remove="${t.spk}" title="Person wieder entfernen">✕</button>` : ""}</div>`).join("");
+    $$("[data-remove]", labels).forEach((b) => (b.onclick = () => onRemove(+b.dataset.remove)));
+    loadPeaks(w);
+    draw();
+  }
+  async function loadPeaks(w) {
+    try {
+      const r = await api(`/api/projects/${pid}/waveform?start=${c.start}&end=${c.end}&bins=${Math.min(4000, Math.round(w))}`);
+      peaks = r.peaks; draw();
+    } catch (e) { /* ohne Wellenform weiterarbeiten */ }
+  }
+  function draw() {
+    const w = canvas.width / dpr, h = height();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "#14111f"; ctx.fillRect(0, 0, w, h);
+    // Lineal
+    ctx.fillStyle = "#9a94b3"; ctx.font = "11px system-ui"; ctx.strokeStyle = "#2f2944";
+    const step = pps > 60 ? 1 : pps > 20 ? 2 : pps > 8 ? 5 : 10;
+    for (let s = 0; s <= dur; s += step) {
+      const x = s * pps;
+      ctx.beginPath(); ctx.moveTo(x, RULER - 6); ctx.lineTo(x, h); ctx.stroke();
+      ctx.fillText(`${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`, x + 3, 12);
+    }
+    // Wellenform
+    const mid = RULER + WAVE / 2;
+    ctx.fillStyle = "#6b5fa8";
+    if (peaks.length) {
+      const bw = w / peaks.length;
+      peaks.forEach((p, i) => { const ph = Math.max(1, p * (WAVE / 2 - 3)); ctx.fillRect(i * bw, mid - ph, Math.max(1, bw - 0.3), ph * 2); });
+    }
+    // Spuren
+    tracks.forEach((t, i) => {
+      const y = RULER + WAVE + i * ROW;
+      ctx.fillStyle = i % 2 ? "#1a1628" : "#1d192d"; ctx.fillRect(0, y, w, ROW);
+      // erkannte Wörter (aus den Zeilen)
+      ctx.globalAlpha = 0.35; ctx.fillStyle = t.color;
+      for (const l of lines) if (t.spks.includes(l.spk)) ctx.fillRect(xOf(l.s), y + 9, Math.max(2, xOf(l.e) - xOf(l.s)), ROW - 18);
+      ctx.globalAlpha = 1;
+      // eingezeichnete Bereiche
+      regions.forEach((rg, ri) => {
+        if (!t.spks.includes(rg.spk)) return;
+        const x0 = xOf(rg.s), x1 = xOf(rg.e);
+        ctx.fillStyle = t.color; ctx.fillRect(x0, y + 4, Math.max(3, x1 - x0), ROW - 8);
+        ctx.lineWidth = ri === selIdx ? 3 : 1.5; ctx.strokeStyle = ri === selIdx ? "#ffffff" : "#0b0b0f";
+        ctx.strokeRect(x0, y + 4, Math.max(3, x1 - x0), ROW - 8);
+      });
+    });
+    if (drag && drag.mode === "new") {
+      const t = tracks[drag.row], y = RULER + WAVE + drag.row * ROW;
+      const a = Math.min(drag.t0, drag.t1), b = Math.max(drag.t0, drag.t1);
+      ctx.globalAlpha = 0.7; ctx.fillStyle = t.color; ctx.fillRect(xOf(a), y + 4, xOf(b) - xOf(a), ROW - 8); ctx.globalAlpha = 1;
+    }
+    // Abspielposition
+    const px = (audio.currentTime || 0) * pps;
+    ctx.strokeStyle = "#ff5f6d"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, h); ctx.stroke();
+  }
+  function hit(x, y) {
+    const row = rowOf(y);
+    if (row < 0 || row >= tracks.length) return { row };
+    for (let i = regions.length - 1; i >= 0; i--) {
+      const rg = regions[i];
+      if (!tracks[row].spks.includes(rg.spk)) continue;
+      const x0 = xOf(rg.s), x1 = xOf(rg.e);
+      if (x >= x0 - EDGE && x <= x1 + EDGE) {
+        const mode = Math.abs(x - x0) <= EDGE ? "left" : Math.abs(x - x1) <= EDGE ? "right" : "move";
+        return { row, idx: i, mode };
+      }
+    }
+    return { row };
+  }
+  const pos = (e) => { const b = canvas.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top]; };
+  canvas.addEventListener("mousedown", (e) => {
+    const [x, y] = pos(e);
+    scroll.focus();
+    const h = hit(x, y);
+    if (h.row < 0) { audio.currentTime = Math.max(0, local(tOf(x))); draw(); return; }
+    if (h.row >= tracks.length) return;
+    if (h.idx !== undefined) {
+      selIdx = h.idx; onSelect();
+      const rg = regions[h.idx];
+      drag = { mode: h.mode, idx: h.idx, startT: tOf(x), s0: rg.s, e0: rg.e };
+    } else {
+      selIdx = -1; onSelect();
+      drag = { mode: "new", row: h.row, t0: tOf(x), t1: tOf(x) };
+    }
+    draw();
+  });
+  const onMove = (e) => {
+    const [x, y] = pos(e);
+    if (!drag) {
+      const h = hit(x, y);
+      canvas.style.cursor = h.idx !== undefined ? (h.mode === "move" ? "grab" : "ew-resize") : h.row >= 0 ? "crosshair" : "pointer";
+      return;
+    }
+    const t = tOf(x);
+    if (drag.mode === "new") drag.t1 = t;
+    else {
+      const rg = regions[drag.idx], d = t - drag.startT;
+      if (drag.mode === "left") rg.s = Math.min(rg.e - 0.1, Math.max(c.start, drag.s0 + d));
+      else if (drag.mode === "right") rg.e = Math.max(rg.s + 0.1, Math.min(c.end, drag.e0 + d));
+      else {
+        const len = drag.e0 - drag.s0;
+        rg.s = Math.min(c.end - len, Math.max(c.start, drag.s0 + d)); rg.e = rg.s + len;
+      }
+      onSelect();
+    }
+    draw();
+  };
+  const onUp = () => {
+    if (!drag) return;
+    if (drag.mode === "new") {
+      const a = Math.min(drag.t0, drag.t1), b = Math.max(drag.t0, drag.t1);
+      if (b - a >= 0.15) {
+        regions.push({ spk: tracks[drag.row].spk, s: +a.toFixed(3), e: +b.toFixed(3) });
+        selIdx = regions.length - 1;
+        onSelect(); onChange();
+      }
+    }
+    drag = null;
+    draw();
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  scroll.addEventListener("keydown", (e) => {
+    if ((e.key === "Delete" || e.key === "Backspace") && selIdx >= 0) { e.preventDefault(); api_delete(); }
+  });
+  function api_delete() { regions.splice(selIdx, 1); selIdx = -1; onSelect(); onChange(); draw(); }
+  (function loop() {
+    if (!document.body.contains(canvas)) {  // Editor geschlossen
+      window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp);
+      return;
+    }
+    if (stopAt !== null && audio.currentTime >= stopAt) { audio.pause(); stopAt = null; }
+    if (!audio.paused) {
+      draw();
+      const px = audio.currentTime * pps;
+      if (px > scroll.scrollLeft + scroll.clientWidth - 40 || px < scroll.scrollLeft) scroll.scrollLeft = Math.max(0, px - 60);
+    }
+    requestAnimationFrame(loop);
+  })();
+  audio.addEventListener("seeked", draw);
+  new ResizeObserver(() => { if (Math.abs(scroll.clientWidth - lastW) > 2) layout(); }).observe(scroll);  // Fenstergröße
+  layout();
+  return {
+    layout, draw,
+    setZoom: (z) => { zoom = z; layout(); },
+    selected: () => (selIdx >= 0 ? regions[selIdx] : null),
+    deleteSelected: api_delete,
+    clearSelection: () => { selIdx = -1; },
+    stopAt: (t) => { stopAt = t; },
+  };
 }
 
 function parseTs(text) {

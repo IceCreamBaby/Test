@@ -57,6 +57,53 @@ def test_full_flow(monkeypatch, speech_wav):
     assert c2["stale"] and c2["title"] == "Neu"
     assert c2["words"][0]["w"] == "Geänderter"
 
+    # Zeitleiste: Person hinzufügen, Sprechbereiche einzeichnen, Text für gleichzeitiges Reden
+    data = client.get(f"/api/projects/{pid}/clips/{clip['id']}/lines").json()
+    assert [t["char"] for t in data["tracks"]] == ["rezo", "julien"]
+    assert all("orig_spk" in ln for ln in data["lines"])
+    c0 = p["clips"][0]
+    body = {"extra_speakers": [{"spk": 1000, "char": "gast"}],
+            "regions": [{"spk": 1, "s": c0["start"] + 1.0, "e": c0["start"] + 2.5},
+                        {"spk": 1000, "s": c0["start"] + 3.0, "e": c0["start"] + 4.0},
+                        {"spk": 1000, "s": c0["start"] + 3.9, "e": c0["start"] + 4.5}],
+            "lines": data["lines"] + [{"new": True, "spk": 1000, "s": c0["start"] + 3.0, "e": c0["start"] + 4.0,
+                                       "text": "Ich bin auch da!"}]}
+    c3 = client.patch(f"/api/projects/{pid}/clips/{clip['id']}", json=body).json()
+    assert c3["extra_speakers"] == [{"spk": 1000, "char": "gast"}]
+    assert len(c3["regions"]) == 2  # überlappende Bereiche derselben Person zusammengefasst
+    assert any(w["spk"] == 1000 and w["w"] == "Ich" for w in c3["words"])
+    data = client.get(f"/api/projects/{pid}/clips/{clip['id']}/lines").json()
+    assert [t["char"] for t in data["tracks"]] == ["rezo", "julien", "gast"]
+    bad = client.patch(f"/api/projects/{pid}/clips/{clip['id']}", json={"regions": [{"spk": 7, "s": 1, "e": 2}]})
+    assert bad.status_code == 400
+    wf = client.get(f"/api/projects/{pid}/waveform", params={"start": c0["start"], "end": c0["end"], "bins": 100}).json()
+    assert len(wf["peaks"]) == 100 and max(wf["peaks"]) == 1.0
+    # Audio muss Range können, sonst springt der Browser nicht
+    span = {"start": c0["start"], "end": c0["end"]}
+    full = client.get(f"/api/projects/{pid}/audio", params=span)
+    assert full.headers["accept-ranges"] == "bytes"
+    part = client.get(f"/api/projects/{pid}/audio", params=span, headers={"Range": "bytes=100-199"})
+    assert part.status_code == 206 and part.content == full.content[100:200]
+    assert part.headers["content-range"] == f"bytes 100-199/{len(full.content)}"
+    client.post(f"/api/projects/{pid}/clips/{clip['id']}/render")
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        c4 = client.get(f"/api/projects/{pid}").json()["clips"][0]
+        if c4["status"] in ("done", "error") and not c4.get("stale"):
+            break
+        time.sleep(0.5)
+    assert c4["status"] == "done", c4.get("error")
+
+    # Person wieder entfernen: dazugeschriebener Text fällt weg, umgestellte Zeilen bekommen den erkannten Sprecher
+    data = client.get(f"/api/projects/{pid}/clips/{clip['id']}/lines").json()
+    moved = next(ln for ln in data["lines"] if ln["spk"] != 1000)
+    moved["spk"] = 1000
+    client.patch(f"/api/projects/{pid}/clips/{clip['id']}", json={"lines": data["lines"]})
+    c5 = client.patch(f"/api/projects/{pid}/clips/{clip['id']}", json={"extra_speakers": []}).json()
+    assert not any(w["spk"] == 1000 or w.get("added") for w in c5["words"])
+    assert any(abs(w["s"] - moved["s"]) < 0.05 and w["spk"] in (0, 1) for w in c5["words"])
+    assert [r["spk"] for r in c5["regions"]] == [1]
+
     # Sprecher tauschen + Vorschau
     r = client.post(f"/api/projects/{pid}/speakers", json={"speakers": [{"spk": 0, "char": "julien"},
                                                                         {"spk": 1, "char": "rezo"}]}).json()

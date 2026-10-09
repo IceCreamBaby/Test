@@ -322,11 +322,67 @@ def plan_shots(spk_segments: list[tuple[float, float, int]], duration: float, n_
             continue
         out.append(sh)
     out[-1].end = max(out[-1].end, duration)
+    out = _wide_on_overlap(out, spk_segments, duration)
     # zu kurze Shots an den Vorgänger anhängen
     merged: list[Shot] = []
     for sh in out:
         if merged and sh.end - sh.start < 0.9:
             merged[-1].end = sh.end
+        else:
+            merged.append(sh)
+    return merged
+
+
+def overlap_intervals(spk_segments: list[tuple[float, float, int]], min_len: float = 0.6) -> list[tuple[float, float]]:
+    """Zeitabschnitte, in denen mindestens zwei Figuren gleichzeitig sprechen."""
+    events = []
+    for s, e, k in spk_segments:
+        events.append((s, 1, k))
+        events.append((e, -1, k))
+    events.sort(key=lambda x: (x[0], x[1]))
+    count: dict[int, int] = {}
+    out: list[list[float]] = []
+    start = None
+    for t, d, k in events:
+        count[k] = count.get(k, 0) + d
+        active = sum(1 for v in count.values() if v > 0)
+        if active >= 2 and start is None:
+            start = t
+        elif active < 2 and start is not None:
+            if out and start - out[-1][1] < 0.4:
+                out[-1][1] = t
+            else:
+                out.append([start, t])
+            start = None
+    return [(a, b) for a, b in out if b - a >= min_len]
+
+
+def _wide_on_overlap(shots: list[Shot], spk_segments, duration: float) -> list[Shot]:
+    """Reden mehrere gleichzeitig, zeigt die Kamera die Totale."""
+    overlaps = [(max(0.0, a - 0.25), min(duration, b + 0.4)) for a, b in overlap_intervals(spk_segments)]
+    if not overlaps:
+        return shots
+    out: list[Shot] = []
+    for sh in shots:
+        pieces = [(sh.start, sh.end)]
+        for a, b in overlaps:
+            nxt = []
+            for s, e in pieces:
+                if b <= s or a >= e:
+                    nxt.append((s, e))
+                    continue
+                if s < a:
+                    nxt.append((s, a))
+                if b < e:
+                    nxt.append((b, e))
+            pieces = nxt
+        out.extend(Shot(s, e, sh.kind, sh.target) for s, e in pieces if e - s > 1e-3)
+    out.extend(Shot(a, b, "wide") for a, b in overlaps)
+    out.sort(key=lambda x: x.start)
+    merged: list[Shot] = []
+    for sh in out:
+        if merged and merged[-1].kind == sh.kind and merged[-1].target == sh.target and sh.start - merged[-1].end < 1e-3:
+            merged[-1].end = max(merged[-1].end, sh.end)
         else:
             merged.append(sh)
     return merged

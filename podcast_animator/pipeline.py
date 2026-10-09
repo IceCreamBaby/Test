@@ -67,10 +67,36 @@ def clip_words(store: ProjectStore, p: dict, clip: dict) -> list[dict]:
     return words_in_range(tr["words"], clip["start"], clip["end"])
 
 
-def seats_for(p: dict) -> list:
+EXTRA_SPK_BASE = 1000  # Sprecher-Nummern für Personen, die nur in einem Clip von Hand hinzugefügt wurden
+
+
+def seats_for(p: dict, clip: dict | None = None) -> list:
+    """Figuren am Tisch: Zuordnung aus dem Projekt plus im Clip-Editor hinzugefügte Personen."""
     chars = {c["id"]: get_character(c["id"]) for c in list_characters()}
     mapping = [sp for sp in p.get("speakers", []) if sp.get("char") in chars]
+    mapping += [x for x in (clip or {}).get("extra_speakers") or [] if x.get("char") in chars]
     return seats_from_mapping(mapping, chars)
+
+
+def clip_tracks(p: dict, clip: dict) -> list[dict]:
+    """Spuren für die Zeitleiste im Clip-Editor: eine pro Figur (mit ihrer Haupt-Sprechernummer)."""
+    tracks: list[dict] = []
+    seen: dict[str, dict] = {}
+    entries = [dict(sp, extra=False) for sp in p.get("speakers", [])]
+    entries += [dict(x, extra=True) for x in clip.get("extra_speakers") or []]
+    for sp in entries:
+        cid = sp.get("char")
+        if not cid or cid == "none":
+            continue
+        if cid in seen:
+            seen[cid]["spks"].append(int(sp["spk"]))
+            continue
+        ch = get_character(cid)
+        t = {"spk": int(sp["spk"]), "spks": [int(sp["spk"])], "char": cid, "name": ch.get("name", cid),
+             "color": ch.get("color", "#ffd400"), "extra": sp["extra"]}
+        seen[cid] = t
+        tracks.append(t)
+    return tracks
 
 
 def render_options(p: dict, clip: dict) -> RenderOptions:
@@ -345,7 +371,7 @@ class Pipeline:
         store = self.store
         p = store.get(pid)
         clip = next(c for c in p["clips"] if c["id"] == cid)
-        seats = seats_for(p)
+        seats = seats_for(p, clip)
         if not seats:
             raise RuntimeError("Keine Figuren zugeordnet – bitte bei 'Sprecher' Figuren auswählen.")
         opts = render_options(p, clip)
@@ -362,7 +388,8 @@ class Pipeline:
         # Projektzeit -> Zeit in der Originaldatei (falls nur ein Bereich verarbeitet wurde)
         offset = float(p.get("offset") or 0.0)
         res = render_clip(p["source"], store.dir(pid) / "audio16k.wav", words, clip["start"], clip["end"], seats,
-                          out, opts, progress=prog, cancel=cancel, source_offset=offset)
+                          out, opts, progress=prog, cancel=cancel, source_offset=offset,
+                          regions=clip.get("regions"))
         rel = {k: str(Path(v).relative_to(store.dir(pid))) for k, v in res.items() if k in ("video", "srt", "thumb")}
         if old and old != rel["video"]:
             for ext in (".mp4", ".srt", ".jpg"):
@@ -375,7 +402,8 @@ class Pipeline:
         p = self.store.get(pid)
         clip = next(c for c in p["clips"] if c["id"] == cid)
         return render_preview(self.store.dir(pid) / "audio16k.wav", clip_words(self.store, p, clip),
-                              clip["start"], clip["end"], seats_for(p), render_options(p, clip), at)
+                              clip["start"], clip["end"], seats_for(p, clip), render_options(p, clip), at,
+                              regions=clip.get("regions"))
 
 
 def name_mentions(words: list[dict], speakers: list[int], chars: list[str], margin: int = 3) -> dict[int, str]:

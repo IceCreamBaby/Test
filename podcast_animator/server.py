@@ -10,24 +10,47 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import media, transcribe
 from .paths import DATA_DIR, WEB_DIR, ensure_dirs
-from .pipeline import Worker, clip_words, default_settings, new_clip
+from .pipeline import EXTRA_SPK_BASE, Worker, clip_tracks, clip_words, default_settings, new_clip
 from .render.characters import DEFAULT_STYLE, get_character, list_characters, save_character
 from .render.scene import THEMES
 from .render.video import RenderOptions, character_preview
 from .store import ProjectStore, ai_config, load_settings, save_settings
-from .transcript import retime_text, sentences
+from .transcript import retime_text, sentences, sentences_by_speaker
 
 log = logging.getLogger(__name__)
 
 UPLOAD_DIR = DATA_DIR / "uploads"
 MEDIA_EXT = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg",
              ".opus", ".wma"}
+
+
+def ranged_response(data: bytes, media_type: str, range_header: str | None) -> Response:
+    """Antwort mit HTTP-Range-Unterstützung – ohne kann der Browser im Audio nicht springen."""
+    headers = {"Accept-Ranges": "bytes"}
+    size = len(data)
+    if range_header and range_header.startswith("bytes="):
+        first = range_header[6:].split(",")[0].strip()
+        a_txt, _, b_txt = first.partition("-")
+        try:
+            if a_txt:
+                a, b = int(a_txt), int(b_txt) if b_txt else size - 1
+            else:  # "bytes=-500" = die letzten 500 Bytes
+                a, b = max(0, size - int(b_txt)), size - 1
+        except ValueError:
+            a, b = 0, size - 1
+        if a >= size or a > b:
+            return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+        b = min(b, size - 1)
+        headers["Content-Range"] = f"bytes {a}-{b}/{size}"
+        return Response(data[a:b + 1], status_code=206, media_type=media_type, headers=headers)
+    return Response(data, media_type=media_type, headers=headers)
 
 
 def create_app() -> FastAPI:
@@ -252,7 +275,7 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/projects/{pid}/audio")
-    def audio(pid: str, start: float, end: float):
+    def audio(pid: str, start: float, end: float, request: Request):
         project_or_404(pid)
         end = min(end, start + 240)
         data, sr = media.read_wav(store.dir(pid) / "audio16k.wav", start, end)
@@ -263,7 +286,7 @@ def create_app() -> FastAPI:
             w.setsampwidth(2)
             w.setframerate(sr)
             w.writeframes((data.clip(-1, 1) * 32767).astype("<i2").tobytes())
-        return Response(buf.getvalue(), media_type="audio/wav")
+        return ranged_response(buf.getvalue(), "audio/wav", request.headers.get("range"))
 
     @app.get("/api/projects/{pid}/file")
     def file(pid: str, path: str, download: int = 0):
@@ -324,6 +347,22 @@ def create_app() -> FastAPI:
         if "render" in body:
             upd["render"] = {k: v for k, v in (body["render"] or {}).items()
                              if k in RenderOptions.__dataclass_fields__}
+        if "extra_speakers" in body:
+            known_chars = {c["id"] for c in list_characters()}
+            extras, used = [], set()
+            for x in body["extra_speakers"] or []:
+                spk, char = int(x.get("spk", 0)), str(x.get("char", ""))
+                if spk < EXTRA_SPK_BASE or char not in known_chars or spk in used:
+                    raise HTTPException(400, f"Ungültige Person: {x}")
+                used.add(spk)
+                extras.append({"spk": spk, "char": char})
+            upd["extra_speakers"] = extras
+        allowed = {int(sp["spk"]) for sp in p.get("speakers", [])}
+        allowed |= {x["spk"] for x in upd.get("extra_speakers", clip.get("extra_speakers") or [])}
+        if "regions" in body:
+            upd["regions"] = _clean_regions(body["regions"] or [], allowed, start, end)
+        elif "extra_speakers" in body and clip.get("regions"):
+            upd["regions"] = [r for r in clip["regions"] if r["spk"] in allowed]
         if "lines" in body:
             upd["words"] = _words_from_lines(clip_words(store, p, clip), body["lines"])
         elif clip.get("words") and ("start" in upd or "end" in upd):
@@ -334,6 +373,11 @@ def create_app() -> FastAPI:
             hi = max((w["e"] for w in edited), default=start)
             extra = [dict(w) for w in tr["words"] if start <= w["s"] < end and not (lo <= w["s"] < hi)]
             upd["words"] = sorted(edited + extra, key=lambda w: w["s"])
+        words = upd.get("words", clip.get("words"))
+        if words and ("lines" in body or "extra_speakers" in body):
+            # Wörter von entfernten Personen (oder "wie erkannt") bekommen wieder den erkannten Sprecher
+            tr = store.transcript(pid) or {"words": []}
+            upd["words"] = _restore_unknown_speakers(words, tr["words"], allowed)
         if body.get("reset_words"):
             upd["words"] = None
         if clip.get("status") == "done":
@@ -358,7 +402,23 @@ def create_app() -> FastAPI:
         p = project_or_404(pid)
         clip = clip_or_404(p, cid)
         words = clip_words(store, p, clip)
-        return {"lines": [g.to_dict() for g in sentences(words)], "edited": bool(clip.get("words"))}
+        lines = [dict(g.to_dict(), orig_spk=g.spk) for g in sentences_by_speaker(words)]
+        return {"lines": lines, "edited": bool(clip.get("words")), "tracks": clip_tracks(p, clip),
+                "regions": clip.get("regions") or [], "extra_speakers": clip.get("extra_speakers") or []}
+
+    @app.get("/api/projects/{pid}/waveform")
+    def waveform(pid: str, start: float, end: float, bins: int = 800):
+        """Spitzenwerte der Tonspur für die Zeitleiste (0..1)."""
+        project_or_404(pid)
+        end = min(end, start + 600)
+        data, _ = media.read_wav(store.dir(pid) / "audio16k.wav", start, end)
+        bins = max(10, min(4000, bins))
+        if len(data) == 0:
+            return {"peaks": []}
+        edges = np.linspace(0, len(data), bins + 1).astype(int)
+        peaks = [float(np.abs(data[a:b]).max()) if b > a else 0.0 for a, b in zip(edges, edges[1:])]
+        top = max(peaks) or 1.0
+        return {"peaks": [round(v / top, 3) for v in peaks]}
 
     @app.post("/api/projects/{pid}/clips/{cid}/render")
     def render(pid: str, cid: str):
@@ -441,16 +501,75 @@ def _hint(key: str | None) -> str:
     return ("…" + key[-4:]) if key else ""
 
 
+def _clean_regions(regions: list[dict], allowed: set[int], start: float, end: float) -> list[dict]:
+    """Sprechbereiche prüfen, auf den Clip beschneiden und Überlappungen je Person zusammenfassen."""
+    by_spk: dict[int, list[list[float]]] = {}
+    for r in regions:
+        try:
+            spk, s, e = int(r["spk"]), float(r["s"]), float(r["e"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, f"Ungültiger Bereich: {r}") from None
+        if spk not in allowed:
+            raise HTTPException(400, f"Unbekannte Person in Bereich: {spk}")
+        s, e = max(s, start), min(e, end)
+        if e - s >= 0.1:
+            by_spk.setdefault(spk, []).append([s, e])
+    out = []
+    for spk, items in by_spk.items():
+        items.sort()
+        merged: list[list[float]] = []
+        for s, e in items:
+            if merged and s <= merged[-1][1] + 0.05:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        out += [{"spk": spk, "s": round(s, 3), "e": round(e, 3)} for s, e in merged]
+    return sorted(out, key=lambda r: r["s"])
+
+
+def _restore_unknown_speakers(words: list[dict], source: list[dict], allowed: set[int]) -> list[dict]:
+    """Wörter mit unbekanntem Sprecher -> Sprecher aus dem Transkript (größte Überlappung).
+
+    Im Editor dazugeschriebener Text ("added") einer entfernten Person fällt weg."""
+    out = []
+    for w in words:
+        if w.get("spk") in allowed:
+            out.append(w)
+            continue
+        if w.get("added"):
+            continue
+        best, best_ov = None, 0.0
+        for o in source:
+            if o["e"] <= w["s"] or o["s"] >= w["e"]:
+                continue
+            ov = min(o["e"], w["e"]) - max(o["s"], w["s"])
+            if ov > best_ov and o.get("spk") in allowed:
+                best, best_ov = o["spk"], ov
+        if best is not None:
+            out.append(dict(w, spk=best))
+    return out
+
+
 def _words_from_lines(words: list[dict], lines: list[dict]) -> list[dict]:
-    """Baut aus bearbeiteten Zeilen (Text/Sprecher) wieder Wörter mit Zeitstempeln."""
+    """Baut aus bearbeiteten Zeilen (Text/Sprecher) wieder Wörter mit Zeitstempeln.
+
+    Zeilen mit "new": true sind im Editor neu hinzugefügt (z.B. Text für jemanden, der gleichzeitig redet)."""
     out: list[dict] = []
     for line in lines:
         s, e = float(line["s"]), float(line["e"])
-        old = [w for w in words if s - 0.01 <= w["s"] <= e + 0.01]
+        if line.get("new"):
+            if e - s >= 0.1 and str(line.get("text", "")).strip():
+                out.extend(dict(w, added=True) for w in retime_text([{"w": "", "s": s, "e": e, "spk": int(line["spk"])}],
+                                                                    str(line["text"]).strip(), int(line["spk"])))
+            continue
+        orig = line.get("orig_spk")
+        old = [w for w in words if s - 0.01 <= w["s"] <= e + 0.01 and (orig is None or w.get("spk") == orig)]
         if not old:
             continue
         text = str(line.get("text", "")).strip()
         if not text:  # Zeile gelöscht -> keine Untertitel, Figur bewegt den Mund nicht
             continue
-        out.extend(retime_text(old, text, int(line.get("spk", old[0].get("spk", 0)))))
+        added = all(w.get("added") for w in old)  # war schon dazugeschriebener Text
+        out.extend(dict(w, added=True) if added else w
+                   for w in retime_text(old, text, int(line.get("spk", old[0].get("spk", 0)))))
     return sorted(out, key=lambda w: w["s"])

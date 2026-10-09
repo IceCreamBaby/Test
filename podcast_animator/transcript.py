@@ -98,6 +98,14 @@ def sentences(words: list[dict], max_gap: float = 1.0) -> list[Group]:
     return groups
 
 
+def sentences_by_speaker(words: list[dict], max_gap: float = 1.0) -> list[Group]:
+    """Sätze je Sprecher getrennt gebildet (bei gleichzeitigem Reden zerfallen die Zeilen nicht)."""
+    out: list[Group] = []
+    for spk in sorted({w.get("spk", 0) for w in words}, key=str):
+        out += sentences([w for w in words if w.get("spk", 0) == spk], max_gap)
+    return sorted(out, key=lambda g: g.start)
+
+
 def subtitle_chunks(words: list[dict], max_words: int = 3, max_chars: int = 18,
                     max_gap: float = 0.45, split_after: str = ".!?…,;:") -> list[Group]:
     """Kurze Untertitel-Häppchen im Shorts-Stil (wenige Wörter, Wechsel bei Sprecher/Pause/Satzende)."""
@@ -146,12 +154,16 @@ def to_srt(words: list[dict], speaker_names: dict[int, str] | None = None) -> st
         return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
 
     lines = []
-    chunks = subtitle_chunks(words, max_words=10, max_chars=50, max_gap=0.8, split_after=".!?…")
+    chunks: list[Group] = []
+    for spk in sorted({w.get("spk", 0) for w in words}, key=str):
+        chunks += subtitle_chunks([w for w in words if w.get("spk", 0) == spk], max_words=10, max_chars=50,
+                                  max_gap=0.8, split_after=".!?…")
+    chunks.sort(key=lambda g: g.start)
     for i, g in enumerate(chunks, 1):
         name = (speaker_names or {}).get(g.spk)
         text = f"{name}: {g.text}" if name else g.text
         # mindestens ~0,8 s sichtbar, aber nicht über den nächsten Eintrag hinaus
-        nxt = chunks[i].start if i < len(chunks) else g.end + 1.0
+        nxt = next((x.start for x in chunks[i:] if x.spk == g.spk or x.start >= g.end), g.end + 1.0)
         end = min(max(g.end, g.start + 0.8), nxt - 0.02) if nxt > g.end else g.end
         lines.append(f"{i}\n{ts(g.start)} --> {ts(end)}\n{text}\n")
     return "\n".join(lines)

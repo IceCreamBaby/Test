@@ -65,8 +65,10 @@ class Seat:
 
 class ClipRenderer:
     def __init__(self, words_local: list[dict], env: np.ndarray, duration: float, seats: list[Seat],
-                 opts: RenderOptions):
+                 opts: RenderOptions, regions: list[dict] | None = None):
+        """regions: von Hand eingezeichnete Sprechbereiche [{spk, s, e}] in Clip-Zeit."""
         self.opts = opts
+        self.regions = regions or []
         self.fps = opts.fps
         self.duration = duration
         self.n = max(1, int(round(duration * self.fps)))
@@ -82,8 +84,10 @@ class ClipRenderer:
                                    with_mic=[bool(seat.style.get("mic", True)) for seat in seats])
         self.env = env
         self.anim = Animator(words_local, env, self.fps, self.n, self.slot_of_spk,
-                             [s.inner for s in self.slots], liveliness=opts.liveliness)
+                             [s.inner for s in self.slots], liveliness=opts.liveliness, regions=self.regions)
         segs = [(w["s"], w["e"], self.slot_of_spk[w["spk"]]) for w in words_local if w.get("spk") in self.slot_of_spk]
+        segs += [(r["s"], r["e"], self.slot_of_spk[r["spk"]]) for r in self.regions if r.get("spk") in self.slot_of_spk]
+        segs.sort()
         self.shots = plan_shots(segs, duration, len(seats))
         self.punch = self._punch_track()
         colors = {}
@@ -221,10 +225,20 @@ def clip_inputs(audio_wav: str | Path, words: list[dict], start: float, end: flo
     return local, env
 
 
+def local_regions(regions: list[dict] | None, start: float, end: float) -> list[dict]:
+    """Sprechbereiche (Projektzeit) -> Clip-Zeit, auf den Clip beschnitten."""
+    out = []
+    for r in regions or []:
+        s, e = max(r["s"], start) - start, min(r["e"], end) - start
+        if e - s > 0.05:
+            out.append({"spk": r["spk"], "s": round(s, 3), "e": round(e, 3)})
+    return out
+
+
 def prepare(audio_wav: str | Path, words: list[dict], start: float, end: float, seats: list[Seat],
-            opts: RenderOptions) -> ClipRenderer:
+            opts: RenderOptions, regions: list[dict] | None = None) -> ClipRenderer:
     local, env = clip_inputs(audio_wav, words, start, end, opts.fps)
-    return ClipRenderer(local, env, end - start, seats, opts)
+    return ClipRenderer(local, env, end - start, seats, opts, local_regions(regions, start, end))
 
 
 FRAME_PIX_FMT = "rgba"
@@ -306,7 +320,8 @@ def _segment_worker(payload: dict, a: int, b: int, seg_path: str, progress_q, ca
     """Läuft in einem eigenen Prozess: rendert die Frames [a, b) als stummes Video-Segment."""
     seats = [Seat(style=s["style"], speakers=s["speakers"]) for s in payload["seats"]]
     opts = RenderOptions.from_dict(payload["opts"])
-    r = ClipRenderer(payload["words"], np.asarray(payload["env"], dtype=np.float32), payload["duration"], seats, opts)
+    r = ClipRenderer(payload["words"], np.asarray(payload["env"], dtype=np.float32), payload["duration"], seats, opts,
+                     payload.get("regions"))
     pending = [0]
 
     def tick(n: int) -> None:
@@ -330,12 +345,13 @@ def default_workers() -> int:
 def render_clip(source: str | Path, audio_wav: str | Path, words: list[dict], start: float, end: float,
                 seats: list[Seat], out_path: str | Path, opts: RenderOptions,
                 progress: ProgressFn | None = None, cancel: threading.Event | None = None,
-                workers: int | None = None, source_offset: float = 0.0) -> dict:
+                workers: int | None = None, source_offset: float = 0.0, regions: list[dict] | None = None) -> dict:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if progress:
         progress(0.0, "Bereite Animation vor …")
     words_local, env = clip_inputs(audio_wav, words, start, end, opts.fps)
+    regions_local = local_regions(regions, start, end)
     duration = end - start
     fps = opts.fps
     n = max(1, int(round(duration * fps)))
@@ -360,7 +376,7 @@ def render_clip(source: str | Path, audio_wav: str | Path, words: list[dict], st
 
     is_cancelled = (lambda: cancel is not None and cancel.is_set())
     if workers == 1:
-        r = ClipRenderer(words_local, env, duration, seats, opts)
+        r = ClipRenderer(words_local, env, duration, seats, opts, regions_local)
         args = ["-y", "-loglevel", "error", *_video_args(fps, opts), *audio_in, "-map", "0:v:0", "-map", "1:a:0?",
                 *_x264_args(fps, opts), *audio_out, "-movflags", "+faststart", str(tmp)]
         try:
@@ -371,11 +387,11 @@ def render_clip(source: str | Path, audio_wav: str | Path, words: list[dict], st
     else:
         r = None
         _render_parallel(words_local, env, duration, seats, opts, n, workers, out_path, tmp, audio_in, audio_out,
-                         report, cancel)
+                         report, cancel, regions_local)
     tmp.replace(out_path)
     # Untertitel-Datei und Vorschaubild
     if r is None:
-        r = ClipRenderer(words_local, env, duration, seats, opts)
+        r = ClipRenderer(words_local, env, duration, seats, opts, regions_local)
     names = {spk: r.seats[slot].style.get("name", "") for spk, slot in r.slot_of_spk.items()}
     srt_path = out_path.with_suffix(".srt")
     srt_path.write_text(to_srt(r.words, names), encoding="utf-8")
@@ -388,12 +404,13 @@ def render_clip(source: str | Path, audio_wav: str | Path, words: list[dict], st
 
 
 def _render_parallel(words_local, env, duration, seats, opts, n, workers, out_path: Path, tmp: Path,
-                     audio_in, audio_out, report, cancel) -> None:
+                     audio_in, audio_out, report, cancel, regions_local=None) -> None:
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, wait, FIRST_EXCEPTION
 
     payload = {"words": words_local, "env": np.asarray(env, dtype=np.float32).tolist(), "duration": duration,
-               "seats": [{"style": s.style, "speakers": s.speakers} for s in seats], "opts": opts.to_dict()}
+               "seats": [{"style": s.style, "speakers": s.speakers} for s in seats], "opts": opts.to_dict(),
+               "regions": regions_local or []}
     bounds = [round(n * i / workers) for i in range(workers + 1)]
     seg_dir = out_path.parent / f".{out_path.stem}_segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
@@ -432,14 +449,14 @@ def _render_parallel(words_local, env, duration, seats, opts, n, workers, out_pa
 
 
 def render_preview(audio_wav: str | Path | None, words: list[dict], start: float, end: float, seats: list[Seat],
-                   opts: RenderOptions, at: float | None = None) -> bytes:
+                   opts: RenderOptions, at: float | None = None, regions: list[dict] | None = None) -> bytes:
     """Einzelbild als JPEG (für die Vorschau im Browser)."""
     if audio_wav is None:
         dur = max(1.0, end - start)
         r = ClipRenderer(shift_words(words_in_range(words, start, end), start), np.zeros(int(dur * opts.fps)),
-                         dur, seats, opts)
+                         dur, seats, opts, local_regions(regions, start, end))
     else:
-        r = prepare(audio_wav, words, start, end, seats, opts)
+        r = prepare(audio_wav, words, start, end, seats, opts, regions)
     f = int(((at if at is not None else (end - start) * 0.3)) * r.fps)
     img = r.snapshot(max(0, min(r.n - 1, f)))
     return bytes(img.encodeToData(skia.kJPEG, 85))

@@ -25,32 +25,55 @@ class SubtitleStyle:
 
 
 class Subtitles:
+    """Untertitel-Häppchen pro Sprecher. Reden zwei gleichzeitig, stehen beide Zeilen übereinander."""
+
     def __init__(self, words: list[dict], speaker_colors: dict[int, str], speaker_names: dict[int, str],
                  style: SubtitleStyle):
         self.style = style
-        self.chunks: list[Group] = subtitle_chunks(words, max_words=style.max_words,
-                                                   max_chars=18 if style.max_words <= 3 else 28)
+        chunks: list[Group] = []
+        for spk in sorted({w.get("spk", 0) for w in words}, key=str):
+            chunks += subtitle_chunks([w for w in words if w.get("spk", 0) == spk], max_words=style.max_words,
+                                      max_chars=18 if style.max_words <= 3 else 28)
+        self.chunks = sorted(chunks, key=lambda g: g.start)
+        self.visible_until = [self._visible_end(i) for i in range(len(self.chunks))]
         self.colors = speaker_colors
         self.names = speaker_names
         self.font = font(SUB_FONT, style.size)
         self.name_font = font("Montserrat-ExtraBold.ttf", 34)
 
-    def _chunk_at(self, t: float) -> tuple[int, Group | None]:
-        for i, ch in enumerate(self.chunks):
-            nxt = self.chunks[i + 1].start if i + 1 < len(self.chunks) else ch.end + 0.8
-            if ch.start - 0.05 <= t < min(nxt, ch.end + 0.8):
-                return i, ch
-        return -1, None
+    def _visible_end(self, i: int) -> float:
+        ch = self.chunks[i]
+        end = ch.end + 0.8
+        for other in self.chunks[i + 1:]:
+            if other.start >= end:
+                break
+            if other.spk == ch.spk or other.start >= ch.end:
+                # nächstes eigenes Häppchen, oder jemand anderes beginnt nachdem dieses fertig ist
+                end = min(end, max(other.start, ch.end) if other.spk != ch.spk else other.start)
+                break
+        return end
+
+    def chunks_at(self, t: float) -> list[Group]:
+        return [ch for ch, until in zip(self.chunks, self.visible_until) if ch.start - 0.05 <= t < until]
 
     def _text(self, w: str) -> str:
         return w.upper() if self.style.uppercase else w
 
     def draw(self, c: skia.Canvas, t: float, cx: float = 540, y: float | None = None) -> None:
-        idx, ch = self._chunk_at(t)
-        if ch is None:
+        active = self.chunks_at(t)
+        if not active:
             return
+        y = self.style.y if y is None else y
+        if len(active) == 1:
+            self._draw_chunk(c, active[0], t, cx, y, 1.0)
+            return
+        # Überlappung: neuestes Häppchen an der normalen Stelle, das ältere kleiner darüber
+        older, newest = active[-2], active[-1]
+        self._draw_chunk(c, older, t, cx, y - self.style.size * 1.75, 0.78)
+        self._draw_chunk(c, newest, t, cx, y + self.style.size * 0.25, 0.92)
+
+    def _draw_chunk(self, c: skia.Canvas, ch: Group, t: float, cx: float, y: float, base_scale: float) -> None:
         st = self.style
-        y = st.y if y is None else y
         hl = self.colors.get(ch.spk, "#ffd400")
         # Zeilenumbruch
         space = self.font.measureText(" ") + st.size * 0.12
@@ -65,7 +88,7 @@ class Subtitles:
             lines[-1].append((w, ww))
         # Pop-Animation beim Erscheinen
         p = (t - ch.start + 0.05) / 0.16
-        scale = 0.78 + 0.22 * ease_out_back(p, 2.2)
+        scale = (0.78 + 0.22 * ease_out_back(p, 2.2)) * base_scale
         alpha = min(1.0, max(0.0, p * 2))
         line_h = st.size * 1.12
         total_h = line_h * len(lines)
