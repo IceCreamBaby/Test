@@ -54,7 +54,12 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ Seiten
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return HTMLResponse((WEB_DIR / "index.html").read_text(encoding="utf-8"))
+        # Versionsstempel an CSS/JS hängen, damit der Browser nach einem Update nicht die alte Oberfläche zeigt
+        html = (WEB_DIR / "index.html").read_text(encoding="utf-8")
+        for name in ("app.js", "style.css"):
+            stamp = int((WEB_DIR / name).stat().st_mtime)
+            html = html.replace(f"/static/{name}", f"/static/{name}?v={stamp}")
+        return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
@@ -82,6 +87,7 @@ def create_app() -> FastAPI:
                          "gemini_key_hint": _hint(s.get("gemini_api_key"))},
             "defaults": default_settings(),
             "data_dir": str(DATA_DIR),
+            "version": app_version(),
         }
 
     @app.post("/api/settings")
@@ -405,6 +411,30 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": str(exc)}, status_code=500)
 
     return app
+
+
+def app_version() -> str:
+    """Kurzer Git-Commit (falls per git geladen), sonst die Paketversion."""
+    from .paths import APP_DIR
+
+    try:
+        head = (APP_DIR / ".git" / "HEAD").read_text().strip()
+        if head.startswith("ref:"):
+            ref = head.split(" ", 1)[1]
+            f = APP_DIR / ".git" / ref
+            if f.exists():
+                return f.read_text().strip()[:7]
+            for line in (APP_DIR / ".git" / "packed-refs").read_text().splitlines():
+                if line.endswith(" " + ref):
+                    return line[:7]
+        return head[:7]
+    except Exception:
+        from importlib.metadata import version
+
+        try:
+            return version("podcast-animator")
+        except Exception:
+            return "?"
 
 
 def _hint(key: str | None) -> str:

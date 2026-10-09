@@ -818,7 +818,8 @@ function viewSettings() {
       <label class="field">Standard-Figuren (Reihenfolge = Sitzplatz links → rechts)
         <input type="text" id="defchars" value="${esc((s.default_chars || []).join(", "))}"></label>
       <div class="row"><div class="spacer"></div><button class="primary" id="save">Speichern</button></div>
-      <div class="hint">Datenordner (Projekte, Modelle, Stimmprofile): <code>${esc(STATE.data_dir)}</code><br>
+      <div class="hint">Programmversion: <code>${esc(STATE.version)}</code><br>
+        Datenordner (Projekte, Modelle, Stimmprofile): <code>${esc(STATE.data_dir)}</code><br>
         Grafikkarte: ${STATE.cuda ? "NVIDIA erkannt – Spracherkennung läuft schnell ✅" : "keine NVIDIA-GPU nutzbar – Spracherkennung auf der CPU"}</div>
     </div>
   </div>`;
