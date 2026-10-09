@@ -5,7 +5,7 @@ die am Podcast-Tisch sitzen und reden, Lippensynchronität, Kamera-Schnitten und
 Gebaut für den Kanal **xxforcegamingxx** mit Rezo- und Julien-Figuren – funktioniert aber mit jedem Podcast.
 
 Alles läuft **lokal auf deinem PC**: Spracherkennung, Sprechererkennung und das Rendern. Optional kann
-Claude (KI) die besten Stellen auswählen und Titel schreiben.
+eine KI (Google Gemini – kostenlos möglich – oder Claude) die besten Stellen auswählen und Titel schreiben.
 
 | Totale | Nahaufnahme | Split-Screen |
 |---|---|---|
@@ -23,7 +23,7 @@ Claude (KI) die besten Stellen auswählen und Titel schreiben.
    Danach **merkt sich das Programm die Stimmen** und ordnet bei neuen Folgen automatisch zu.
    Eingefügte Werbung oder Einspieler werden als „Sonstige“ erkannt und bekommen keine Figur.
 4. **Clip-Suche** – findet die besten Stellen (schnelles Hin und Her, Lacher, Ausrufe, Energie …).
-   Mit Claude-API-Key versteht die KI auch den Inhalt und schreibt packende Titel.
+   Mit einem KI-Key (Gemini kostenlos oder Claude) versteht die KI auch den Inhalt und schreibt packende Titel.
 5. **Animation** – die Figuren sitzen am Studio-Tisch, bewegen die Lippen passend zu den Silben, blinzeln, nicken,
    gestikulieren, lachen mit und schauen sich an. Die virtuelle Kamera schneidet wie bei einem echten Video-Podcast
    (Totale → Nahaufnahme des Sprechers, kurze Zooms bei lauten Pointen).
@@ -42,7 +42,7 @@ Beim ersten Verarbeiten lädt das Programm einmalig die KI-Modelle herunter (Spr
 **macOS / Linux:** `./start.sh` ausführen (unter Linux zusätzlich `libegl1` und `libgl1` installieren:
 `sudo apt install libegl1 libgl1`).
 
-> Kein Internet für die Verarbeitung nötig (außer beim ersten Modell-Download und für die optionale Claude-Funktion).
+> Kein Internet für die Verarbeitung nötig (außer beim ersten Modell-Download und für die optionale KI-Clip-Auswahl).
 
 ## So benutzt du es
 
@@ -99,13 +99,30 @@ Alle Bilder gleich groß mit transparentem Hintergrund, Figur von Kopf bis Bauch
 `height` = Bildhöhe im Video (Pixel), `offset_y` = wie weit die Unterkante unter die Tischkante rutscht,
 `"mic": false` blendet das Studio-Mikrofon vor dieser Figur aus (falls deine Zeichnung schon eins hat).
 
-### Claude für die Clip-Auswahl (optional)
+### KI für die Clip-Auswahl (optional)
 
-Unter **Einstellungen** einen API-Key von [console.anthropic.com](https://console.anthropic.com/) eintragen.
-Dann erscheint beim Erstellen „Clips mit Claude auswählen ✨“. Claude liest das Transkript, sucht Stellen, die ohne
-Kontext funktionieren (Einstieg, Pointe am Ende, keine Werbung) und schreibt Titel. Verwendet wird
-`claude-opus-5-5`; falls eine Anfrage abgelehnt wird, springt automatisch ein Ersatzmodell ein (serverseitiger
-Fallback). Kosten: grob wenige Cent pro Folge. Ohne Key funktioniert alles lokal mit der eingebauten Heuristik.
+Ohne KI wählt eine eingebaute Suche die Clips aus (lebhafte Dialoge, Lacher, Ausrufe) – kostenlos und offline.
+Mit KI wird der Inhalt verstanden: Stellen, die ohne Kontext funktionieren (Einstieg, Pointe am Ende, keine Werbung),
+plus packende Titel. Die KI wird nur **einmal pro Folge** gefragt (bzw. bei „Weitere Clips finden“).
+
+| | Google Gemini (Empfehlung) | Anthropic Claude |
+|---|---|---|
+| Kosten | kostenlose Stufe (Tageslimit), danach wenige Cent pro Folge | ca. 15–30 Cent pro Folge |
+| Modell | `gemini-flash-latest` (aktuelles Flash-Modell) | `claude-opus-5-5` |
+| Key | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | [console.anthropic.com](https://console.anthropic.com/) |
+
+**Gemini-Key besorgen (kostenlos, keine Kreditkarte):**
+1. [aistudio.google.com/apikey](https://aistudio.google.com/apikey) öffnen und mit dem Google-Konto anmelden.
+2. Nutzungsbedingungen bestätigen, dann **„API-Schlüssel erstellen“** (Create API key) klicken.
+3. Den Schlüssel (beginnt mit `AIza`) kopieren, im Programm unter **Einstellungen → KI für die Clip-Auswahl**
+   bei „Gemini-API-Key“ einfügen und speichern.
+
+Danach ist beim Erstellen „Clips mit Gemini auswählen ✨“ angehakt. Hinweise: Google darf Inhalte der kostenlosen Stufe
+zur Verbesserung seiner Produkte nutzen; ist das Tageslimit erreicht, nutzt das Programm automatisch die eingebaute
+Suche und zeigt einen Hinweis. Benennt Google das Modell um, sucht das Programm selbst das neueste Flash-Modell.
+
+**Claude:** Key in der Anthropic Console erstellen (Guthaben aufladen, Ausgabelimit setzen empfohlen; ein Claude-Pro-Abo
+enthält keine API-Nutzung). Bei einer abgelehnten Anfrage springt automatisch ein Ersatzmodell ein.
 
 ### Schneller machen
 
@@ -128,8 +145,8 @@ uv run python -m podcast_animator process folge.mp4 --clips 5 --out fertig
 # Nur einen Bereich als einen einzigen Clip, Split-Screen
 uv run python -m podcast_animator process folge.mp4 --start 1:02:30 --end 1:03:15 --single --layout split
 
-# Mit Claude-Auswahl und fester Figuren-Reihenfolge
-uv run python -m podcast_animator process folge.mp4 --claude --chars rezo,julien
+# Mit KI-Auswahl (Gemini oder Claude, je nach Einstellungen) und fester Figuren-Reihenfolge
+uv run python -m podcast_animator process folge.mp4 --ai --chars rezo,julien
 ```
 
 `python -m podcast_animator --help` zeigt alle Optionen.
@@ -163,7 +180,7 @@ lege den echten Personen keine erfundenen Aussagen in den Mund – das Programm 
 | Zeichnen/Animation | [skia-python](https://github.com/kyamagu/skia-python) (Vektorgrafik), eigener Animations-Code |
 | Video/Audio | ffmpeg (über `imageio-ffmpeg` mitgeliefert), x264, Lautheits-Normalisierung auf −14 LUFS |
 | Oberfläche | FastAPI + HTML/JS, läuft nur lokal auf `127.0.0.1` |
-| Clip-Auswahl (optional) | Claude API (`anthropic`) |
+| Clip-Auswahl (optional) | Google Gemini API (`google-genai`) oder Claude API (`anthropic`) |
 
 ```
 podcast_animator/

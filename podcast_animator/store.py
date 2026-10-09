@@ -13,7 +13,10 @@ from pathlib import Path
 from .paths import PROJECTS_DIR, SETTINGS_FILE, ensure_dirs
 
 DEFAULT_SETTINGS = {
+    "ai_provider": "gemini",          # gemini | claude
     "anthropic_api_key": "",
+    "gemini_api_key": "",
+    "gemini_model": "gemini-flash-latest",
     "watermark": "@xxforcegamingxx · Fan-Animation",
     "sign_text": "PODCAST",
     "default_chars": ["rezo", "julien", "gast"],
@@ -53,8 +56,26 @@ def save_settings(update: dict) -> dict:
         return data
 
 
-def api_key() -> str | None:
-    return load_settings().get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY") or None
+def ai_config(settings: dict | None = None) -> dict:
+    """Aktive KI für die Clip-Auswahl: {'provider', 'name', 'api_key', 'model', 'available'}.
+
+    Ist für den gewählten Anbieter kein Key hinterlegt, aber für den anderen, wird der andere verwendet.
+    """
+    s = settings or load_settings()
+    keys = {
+        "claude": s.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY") or "",
+        "gemini": s.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "",
+    }
+    provider = s.get("ai_provider") if s.get("ai_provider") in keys else "gemini"
+    if not keys[provider]:
+        provider = next((p for p in ("gemini", "claude") if keys[p]), provider)
+    return {
+        "provider": provider,
+        "name": {"claude": "Claude", "gemini": "Gemini"}[provider],
+        "api_key": keys[provider] or None,
+        "model": (s.get("gemini_model") or None) if provider == "gemini" else None,
+        "available": bool(keys[provider]),
+    }
 
 
 # --------------------------------------------------------------------------- Projekte

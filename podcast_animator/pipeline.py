@@ -15,7 +15,7 @@ import numpy as np
 from . import diarize, highlights, media, transcribe
 from .render.characters import get_character, list_characters
 from .render.video import RenderOptions, render_clip, render_preview, seats_from_mapping
-from .store import ProjectStore, api_key, load_settings
+from .store import ProjectStore, ai_config, load_settings
 from .transcript import assign_speakers, words_in_range
 
 log = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ def default_settings() -> dict:
         "clip_count": 5,
         "min_len": 20,
         "max_len": 55,
-        "use_claude": bool(api_key()),
+        "use_ai": ai_config()["available"],
         "auto_render": True,
         "range": None,                  # [start, end] in Sekunden (nur diesen Teil verarbeiten)
         "render": RenderOptions(watermark=s.get("watermark", ""), sign_text=s.get("sign_text", "")).to_dict(),
@@ -230,7 +230,7 @@ class Pipeline:
         store.set_live(pid, None)
 
     def find_clips(self, pid: str, cancel: threading.Event, prog=None, count: int | None = None,
-                   use_claude: bool | None = None, min_len: float | None = None, max_len: float | None = None,
+                   use_ai: bool | None = None, min_len: float | None = None, max_len: float | None = None,
                    append: bool = False) -> None:
         store = self.store
         p = store.get(pid)
@@ -252,10 +252,12 @@ class Pipeline:
             words_free = [w for w in words if not any(c["start"] - 1 <= w["s"] <= c["end"] + 1 for c in existing)]
         else:
             words_free = words
+        ai = ai_config()
         sugg, note = highlights.find_clips(
             words_free, env10, speaker_names(p), count=int(count or s.get("clip_count", 5)),
             min_len=float(min_len or s.get("min_len", 20)), max_len=float(max_len or s.get("max_len", 55)),
-            use_claude=bool(s.get("use_claude") if use_claude is None else use_claude), api_key=api_key(),
+            use_ai=bool(s.get("use_ai", s.get("use_claude")) if use_ai is None else use_ai),
+            provider=ai["provider"], api_key=ai["api_key"], model=ai["model"],
             context=load_settings().get("podcast_context", ""), progress=prog,
             avoid_speakers={sp["spk"] for sp in p.get("speakers", []) if sp.get("other") or sp.get("char") == "none"})
         clips = [new_clip(x.start, x.end, x.title, x.reason, x.score, x.source) for x in sugg]
@@ -481,7 +483,7 @@ class Worker:
                             self.submit("render", job["pid"], cid=c["id"])
                 elif job["kind"] == "find_clips":
                     self.pipeline.find_clips(job["pid"], self.cancel, count=job.get("count"),
-                                             use_claude=job.get("use_claude"), min_len=job.get("min_len"),
+                                             use_ai=job.get("use_ai"), min_len=job.get("min_len"),
                                              max_len=job.get("max_len"), append=job.get("append", True))
                     self.store.set_live(job["pid"], None)
             except Exception as exc:

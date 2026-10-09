@@ -144,8 +144,8 @@ function viewHome() {
           <label class="field">Anzahl Clips<input type="number" id="count" class="tiny" min="1" max="30" value="${d.clip_count}"></label>
           <label class="field">Länge von (s)<input type="number" id="minlen" class="tiny" min="5" max="170" value="${d.min_len}"></label>
           <label class="field">bis (s)<input type="number" id="maxlen" class="tiny" min="10" max="180" value="${d.max_len}"></label>
-          <label class="check" style="align-self:end;padding-bottom:8px" title="${STATE.settings.has_key ? "" : "In den Einstellungen einen Claude-API-Key eintragen"}">
-            <input type="checkbox" id="claude" ${d.use_claude ? "checked" : ""} ${STATE.settings.has_key ? "" : "disabled"}> Clips mit Claude auswählen ✨</label>
+          <label class="check" style="align-self:end;padding-bottom:8px" title="${STATE.settings.has_ai ? "" : "In den Einstellungen einen (kostenlosen) Gemini-Key eintragen"}">
+            <input type="checkbox" id="use-ai" ${d.use_ai && STATE.settings.has_ai ? "checked" : ""} ${STATE.settings.has_ai ? "" : "disabled"}> Clips mit ${esc(STATE.settings.has_ai ? STATE.settings.ai_name : "KI")} auswählen ✨</label>
         </div>
         <div class="row">
           <label class="field">Layout<select id="layout">${opt("studio", "Studio (beide am Tisch, Kamera-Schnitte)", r.layout)}${opt("split", "Split-Screen (oben/unten)", r.layout)}</select></label>
@@ -196,7 +196,7 @@ function viewHome() {
       settings: {
         mode: $('input[name="mode"]:checked').value,
         clip_count: +$("#count").value, min_len: +$("#minlen").value, max_len: +$("#maxlen").value,
-        use_claude: $("#claude").checked, model: $("#model").value, num_speakers: +$("#speakers").value,
+        use_ai: $("#use-ai").checked, model: $("#model").value, num_speakers: +$("#speakers").value,
         auto_render: $("#autorender").checked,
         render: { layout: $("#layout").value, theme: $("#theme").value, title_mode: $("#titlemode").value,
                   uppercase: $("#upper").checked, max_words: +$("#maxwords").value },
@@ -489,7 +489,7 @@ function clipCard(p, c) {
   else if (c.status === "error") status = `<div class="alert err" style="margin:0">${esc(c.error || c.message)}</div>`;
   else if (c.status === "done" && c.stale) status = `<span class="badge warn">Geändert – neu rendern</span>`;
   else if (c.status === "done") status = `<span class="badge ok">Fertig</span>`;
-  const src = c.source === "Claude" ? `<span class="badge pink">✨ Claude</span>` : c.source === "lokal" ? `<span class="badge">Automatisch</span>` : `<span class="badge">${esc(c.source || "manuell")}</span>`;
+  const src = c.source === "Claude" || c.source === "Gemini" ? `<span class="badge pink">✨ ${esc(c.source)}</span>` : c.source === "lokal" ? `<span class="badge">Automatisch</span>` : `<span class="badge">${esc(c.source || "manuell")}</span>`;
   return `<div class="clip" data-id="${c.id}">
     <div class="media">${media}</div>
     <div class="body">
@@ -552,12 +552,12 @@ function moreClipsDialog(pid) {
       <label class="field">Anzahl<input type="number" id="mc-count" class="tiny" value="3" min="1" max="20"></label>
       <label class="field">Länge von (s)<input type="number" id="mc-min" class="tiny" value="${s.min_len}"></label>
       <label class="field">bis (s)<input type="number" id="mc-max" class="tiny" value="${s.max_len}"></label>
-      <label class="check" style="align-self:end;padding-bottom:8px"><input type="checkbox" id="mc-claude" ${STATE.settings.has_key ? "checked" : "disabled"}> mit Claude ✨</label>
+      <label class="check" style="align-self:end;padding-bottom:8px"><input type="checkbox" id="mc-ai" ${STATE.settings.has_ai ? "checked" : "disabled"}> mit ${esc(STATE.settings.has_ai ? STATE.settings.ai_name : "KI")} ✨</label>
     </div>
     <p class="hint">Bereits vorhandene Clip-Bereiche werden übersprungen.</p>
     <div class="row"><div class="spacer"></div><button class="primary" id="mc-go">Suchen</button></div>`);
   $("#mc-go", m.root).onclick = async () => {
-    await api(`/api/projects/${pid}/find_clips`, { json: { count: +$("#mc-count").value, min_len: +$("#mc-min").value, max_len: +$("#mc-max").value, use_claude: $("#mc-claude").checked, append: true } });
+    await api(`/api/projects/${pid}/find_clips`, { json: { count: +$("#mc-count").value, min_len: +$("#mc-min").value, max_len: +$("#mc-max").value, use_ai: $("#mc-ai").checked, append: true } });
     m.close();
     toast("Suche läuft …");
     refreshProject();
@@ -775,15 +775,42 @@ function characterEditor(ch) {
 // --------------------------------------------------------------------------- Einstellungen
 function viewSettings() {
   const s = STATE.settings;
+  const keyField = (id, label, hint, placeholder) => `
+      <label class="field">${label}
+        <input type="password" id="${id}" autocomplete="off" placeholder="${hint ? "gespeichert " + esc(hint) + " – zum Ändern neu eingeben" : placeholder}"></label>
+      ${hint ? `<label class="check"><input type="checkbox" id="${id}-del"> gespeicherten Key löschen</label>` : ""}`;
   $("#app").innerHTML = `
   <div class="card">
     <h1>⚙️ Einstellungen</h1>
-    <div class="stack" style="max-width:720px">
-      <label class="field">Claude-API-Key (optional, für die intelligente Clip-Auswahl und Titel)
-        <input type="password" id="key" placeholder="${s.key_hint ? "gespeichert " + esc(s.key_hint) + " – zum Ändern neu eingeben" : "sk-ant-…"}"></label>
-      ${s.key_hint ? '<label class="check"><input type="checkbox" id="delkey"> gespeicherten Key löschen</label>' : ""}
-      <div class="hint">Ohne Key funktioniert alles lokal und kostenlos. Mit Key versteht Claude den Inhalt (Pointen, Kontext) und schreibt Titel.
-        Kosten: grob ein paar Cent pro Podcast-Folge. Key erstellen: <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a></div>
+    <div class="stack" style="max-width:760px">
+      <h2>✨ KI für die Clip-Auswahl (optional)</h2>
+      <div class="hint">Ohne KI funktioniert alles lokal und kostenlos (eingebaute Suche). Mit KI wird der Inhalt verstanden
+        (Pointen, Kontext) und es gibt bessere Titel. ${s.has_ai ? `Aktiv: <b>${esc(s.ai_name)}</b> ✅` : "Aktuell: keine KI eingerichtet."}</div>
+      <label class="field">Anbieter
+        <select id="provider">${opt("gemini", "Google Gemini – kostenlose Stufe möglich", s.ai_provider)}${opt("claude", "Anthropic Claude – ca. 15–30 Cent pro Folge", s.ai_provider)}</select></label>
+      <div id="gemini-box" class="stack">
+        ${keyField("gkey", "Gemini-API-Key", s.gemini_key_hint, "AIza…")}
+        <div class="alert info" style="margin:0">
+          <b>So bekommst du den Gemini-Key (kostenlos):</b>
+          <ol style="margin:6px 0 0 18px;padding:0">
+            <li>Öffne <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> und melde dich mit deinem Google-Konto an.</li>
+            <li>Nutzungsbedingungen bestätigen, dann auf <b>„API-Schlüssel erstellen“</b> (Create API key) klicken.</li>
+            <li>Den Schlüssel (beginnt mit <code>AIza</code>) kopieren, hier einfügen und speichern. Fertig – keine Kreditkarte nötig.</li>
+          </ol>
+          <div class="hint" style="margin-top:6px">Kostenlose Stufe: begrenzte Anfragen pro Tag (für ein paar Folgen locker genug). Google darf Inhalte
+            der kostenlosen Stufe zur Verbesserung seiner Produkte nutzen. Ist das Limit erreicht, nutzt das Programm automatisch die eingebaute Suche.</div>
+        </div>
+        <details class="adv"><summary>Gemini-Modell (Experten)</summary>
+          <label class="field">Modellname<input type="text" id="gmodel" value="${esc(s.gemini_model || "gemini-flash-latest")}"></label>
+          <div class="hint"><code>gemini-flash-latest</code> nimmt automatisch das aktuelle Flash-Modell. Gibt es ein Modell nicht mehr, sucht das Programm selbst ein passendes.</div>
+        </details>
+      </div>
+      <div id="claude-box" class="stack">
+        ${keyField("ckey", "Claude-API-Key", s.claude_key_hint, "sk-ant-…")}
+        <div class="hint">Key erstellen: <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a> → Guthaben aufladen → „API Keys“.
+          Ein Claude-Pro-Abo enthält keine API-Nutzung. Tipp: Ausgabelimit in der Console setzen.</div>
+      </div>
+      <h2 style="margin-top:12px">Allgemein</h2>
       <label class="field">Kontext für die Clip-Auswahl<input type="text" id="ctx" value="${esc(s.podcast_context)}"></label>
       <label class="field">Namen/Wörter, die die Spracherkennung richtig schreiben soll<input type="text" id="hot" value="${esc(s.hotwords)}"></label>
       <label class="field">Standard-Wasserzeichen<input type="text" id="wm" value="${esc(s.watermark)}"></label>
@@ -795,11 +822,20 @@ function viewSettings() {
         Grafikkarte: ${STATE.cuda ? "NVIDIA erkannt – Spracherkennung läuft schnell ✅" : "keine NVIDIA-GPU nutzbar – Spracherkennung auf der CPU"}</div>
     </div>
   </div>`;
+  const syncProvider = () => {
+    $("#gemini-box").style.display = $("#provider").value === "gemini" ? "" : "none";
+    $("#claude-box").style.display = $("#provider").value === "claude" ? "" : "none";
+  };
+  $("#provider").onchange = syncProvider;
+  syncProvider();
   $("#save").onclick = async () => {
     const body = { podcast_context: $("#ctx").value, hotwords: $("#hot").value, watermark: $("#wm").value, sign_text: $("#sign").value,
-      default_chars: $("#defchars").value.split(",").map((x) => x.trim()).filter(Boolean) };
-    if ($("#key").value.trim()) body.anthropic_api_key = $("#key").value.trim();
-    if ($("#delkey") && $("#delkey").checked) body.anthropic_api_key = "";
+      default_chars: $("#defchars").value.split(",").map((x) => x.trim()).filter(Boolean),
+      ai_provider: $("#provider").value, gemini_model: $("#gmodel").value.trim() || "gemini-flash-latest" };
+    if ($("#gkey").value.trim()) body.gemini_api_key = $("#gkey").value.trim();
+    if ($("#gkey-del") && $("#gkey-del").checked) body.gemini_api_key = "";
+    if ($("#ckey").value.trim()) body.anthropic_api_key = $("#ckey").value.trim();
+    if ($("#ckey-del") && $("#ckey-del").checked) body.anthropic_api_key = "";
     await api("/api/settings", { json: body });
     toast("Gespeichert.");
     route();
